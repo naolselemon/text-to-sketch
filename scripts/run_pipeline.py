@@ -1,9 +1,6 @@
 """
 Unified interactive runner for the Hand Simulation Pipeline.
 
-Runs Stages 1 → 5 on a configurable number of extracted sketches, then
-builds the Tok-Dict codebook from the resulting stroke-5 corpus.
-
 Prerequisites
 -------------
     Run `python scripts/extract_sketches.py` first to populate
@@ -31,7 +28,8 @@ from pipeline.steps.ordering_algorithms import (
 from pipeline.steps.kinematics import generate_kinematics
 from pipeline.steps.stroke5_formatter import to_stroke5
 from pipeline.tokdict.builder import build_codebook, save_codebook
-from pipeline.utils.io import save_stroke5
+from pipeline.tokdict.encoder import encode_stroke5
+from pipeline.utils.io import save_stroke5, save_token_sequence
 
 
 # Interactive prompts
@@ -179,6 +177,23 @@ def run_pipeline(
     print(f"[tokdict]   actual K     : {len(codebook)}")
     print(f"[tokdict]   codebook     : {npy_path}")
     print(f"[tokdict]   metadata     : {meta_path}")
+
+    # Encoding Step
+    tokens_dir = stroke5_dir.parent / "tokens"
+    print(f"\n[encoder] Encoding {len(stroke5_arrays)} stroke-5 arrays to discrete tokens...")
+    print(f"[encoder] Output directory: {tokens_dir}")
+    
+    encoded_count = 0
+    for s5, img_path in zip(stroke5_arrays, samples):
+        try:
+            tokens = encode_stroke5(s5, codebook)
+            out_path = tokens_dir / (img_path.stem + ".npz")
+            save_token_sequence(tokens, out_path)
+            encoded_count += 1
+        except Exception as exc:
+            print(f"  [skip] Failed to encode {img_path.name}: {exc}")
+
+    print(f"[encoder] Successfully encoded {encoded_count} token sequences.")
 
 
 
