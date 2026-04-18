@@ -1,12 +1,7 @@
 """
-Step 3 — Sigma-Lognormal Kinematics.
+Sigma-Lognormal Kinematics.
 
-Adds realistic human hand dynamics to raw vectorised strokes.
-
-Public API
-----------
-    generate_kinematics(strokes, min_duration, delay_between_strokes, sigma)
-        -> list[list[list[float]]]   # [x, y, t] per point
+Adds realistic human hand dynamics to raw vectorised strokes.  
 """ 
 
 from __future__ import annotations
@@ -20,25 +15,10 @@ def generate_kinematics(
     min_duration: float = 0.10,
     delay_between_strokes: float = 0.15,
     sigma: float = 0.50,
+    sample_rate_hz: float = 60.0,
 ) -> list[list[list[float]]]:
-    """Apply Sigma-Lognormal kinematics to a list of ordered strokes.
+    """Apply Sigma-Lognormal kinematics to a list of ordered strokes."""
 
-    Each point gains a realistic timestamp derived from an inverse lognormal
-    CDF mapping over cumulative arc-length — slow at stroke ends, fast in the
-    middle — calibrated to QuickDraw human drawing data.
-
-    Parameters
-    ----------
-    strokes : list of strokes, each a list of (x, y) tuples.
-    min_duration : minimum stroke duration in seconds (default 0.10 s).
-    delay_between_strokes : pen-lift time between consecutive strokes (0.15 s).
-    sigma : lognormal spread (typical range 0.4–0.7; default 0.50).
-
-    Returns
-    -------
-    list[list[list[float]]]
-        Same structure as input but each point is ``[x, y, timestamp_seconds]``.
-    """
     if not strokes:
         return []
 
@@ -78,10 +58,28 @@ def generate_kinematics(
             tau_norm  = (tau - tau[0]) / tau_range if tau_range > 0 else np.zeros(n)
             timestamps = current_time + tau_norm * T_stroke
 
-        stroke_timed = [
-            [float(pts[i, 0]), float(pts[i, 1]), float(timestamps[i])]
-            for i in range(n)
-        ]
+        if D > 0 and len(timestamps) >= 2 and timestamps[-1] > timestamps[0]:
+            dt = 1.0 / sample_rate_hz
+            # Generate uniform time steps
+            t_target = np.arange(timestamps[0], timestamps[-1], dt)
+            
+            # Ensure the final point is precisely included
+            if len(t_target) == 0 or t_target[-1] < timestamps[-1] - 1e-6:
+                t_target = np.append(t_target, timestamps[-1])
+            
+            # Linearly interpolate X and Y over time
+            x_res = np.interp(t_target, timestamps, pts[:, 0])
+            y_res = np.interp(t_target, timestamps, pts[:, 1])
+            
+            stroke_timed = [
+                [float(x_res[j]), float(y_res[j]), float(t_target[j])]
+                for j in range(len(t_target))
+            ]
+        else:
+            stroke_timed = [
+                [float(pts[i, 0]), float(pts[i, 1]), float(timestamps[i])]
+                for i in range(n)
+            ]
         timed_strokes.append(stroke_timed)
         current_time += T_stroke + delay_between_strokes
 

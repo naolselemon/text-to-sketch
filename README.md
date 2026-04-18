@@ -39,7 +39,7 @@ Anime image
   └─ 3: Stroke ordering       (Directional / Greedy / TSP)
   └─ 4: Sigma-Lognormal kinematics
   └─ 5: stroke-5 formatting   → Sketchformer input
-       + Tok-Dict codebook     → K-means discrete motion vocabulary
+       + Tok-Dict              → K-means discrete motion vocabulary & encoding
 ```
 
 ---
@@ -53,7 +53,7 @@ Anime image
 | **3** | `pipeline/steps/ordering_algorithms.py` | Directional bias / Greedy NN / TSP ordering |
 | **4** | `pipeline/steps/kinematics.py` | Sigma-Lognormal velocity model |
 | **5** | `pipeline/steps/stroke5_formatter.py` | stroke-5 `[Δx, Δy, p1, p2, p3]` formatter |
-| **Tok-Dict** | `pipeline/tokdict/` | K-means codebook builder + encoder |
+| **Tok-Dict** | `pipeline/tokdict/` | K-means codebook builder + encoder + decoder |
 
 ---
 
@@ -74,7 +74,8 @@ text-to-sketch/
 │   ├── tokdict/                       # Tok-Dict module
 │   │   ├── __init__.py
 │   │   ├── builder.py                 # K-means codebook builder
-│   │   └── encoder.py                 # stroke-5 → token-index encoder/decoder
+│   │   ├── decoder.py                 # token-index → stroke-5 decoder
+│   │   └── encoder.py                 # stroke-5 → token-index encoder
 │   └── utils/
 │       ├── __init__.py
 │       └── io.py                      # save/load helpers for .npz and .npy
@@ -83,7 +84,8 @@ text-to-sketch/
 │   ├── download_data.py               # Kaggle dataset download
 │   ├── extract_sketches.py            # Stage 1 batch lineart extraction
 │   ├── run_pipeline.py                # Unified interactive pipeline runner (2–5)
-│   └── evaluate_ordering.py           # Ordering visualisation & evaluation
+│   ├── evaluate_ordering.py           # Ordering visualisation & evaluation
+│   └── evaluate_encoder.py            # Tok-Dict encoding/decoding evaluation
 │
 ├── data/                              # All data (git-ignored)
 │   ├── raw/                           # Raw downloaded datasets
@@ -91,6 +93,7 @@ text-to-sketch/
 │       ├── sketches/                  # Stage 1 output — binary line-art .png
 │       ├── stroke5/                   # Stage 5 output — stroke-5 .npz files
 │       ├── tokdict/                   # Tok-Dict output — codebook.npy + metadata.json
+│       ├── tokens/                    # Tok-Dict output — encoded tokens .npz files
 │       └── evaluations/               # Ordering evaluation plots
 │
 ├── .env                               # Local environment variables (git-ignored)
@@ -244,17 +247,24 @@ Produces:
 - `data/processed/stroke5/<name>.npz` — stroke-5 arrays, shape `(N+1, 5)`
 - `data/processed/tokdict/codebook.npy` — K-means centroids, shape `(K, 2)`
 - `data/processed/tokdict/metadata.json` — K, n_samples, timestamp
+- `data/processed/tokens/<name>.npz` — encoded discrete motion token sequences
 
 ---
 
-### 4. Evaluate Ordering
+### 4. Evaluate Output
 
+**Evaluate Ordering:**
 ```bash
 python scripts/evaluate_ordering.py
 python scripts/evaluate_ordering.py --samples 20
 ```
-
 Saves side-by-side evaluation plots to `data/processed/evaluations/`.
+
+**Evaluate Tok-Dict Encoder:**
+```bash
+python scripts/evaluate_encoder.py
+```
+Tests the encoding-decoding cycle and computes quantization loss.
 
 ---
 
@@ -289,13 +299,20 @@ Encode a sketch to token indices:
 ```python
 from pipeline.utils.io import load_codebook
 from pipeline.tokdict.encoder import encode_stroke5
+from pipeline.tokdict.decoder import decode_tokens
 
 codebook = load_codebook("data/processed/tokdict/codebook.npy")
 tokens   = encode_stroke5(s5, codebook)   # shape (N+1,), dtype int32
 # tokens[i] ∈ [0, K-1]  → motion token
 # tokens[i] == K         → pen-lift token
 # tokens[i] == K+1       → end-of-sketch token
+
+# Decode back to stroke-5
+reconstructed_s5 = decode_tokens(tokens, codebook)
 ```
+
+**Tokens format (`data/processed/tokens/*.npz`)**:
+Each `.npz` contains a discrete sequence array named `tokens` resulting from encoding `stroke-5` with the codebook.
 
 ---
 
@@ -323,3 +340,4 @@ tokens   = encode_stroke5(s5, codebook)   # shape (N+1,), dtype int32
 | `python scripts/extract_sketches.py [--input-dir] [--output-dir] [--detect-resolution] [--image-resolution] [--max-per-folder]` | Run Stage A lineart extraction |
 | `python scripts/run_pipeline.py` | Interactive Stages B–E + Tok-Dict |
 | `python scripts/evaluate_ordering.py [--samples N]` | Visualise ordering quality |
+| `python scripts/evaluate_encoder.py` | Evaluate Tok-Dict encoding/decoding |
