@@ -1,5 +1,4 @@
-# Text-to-Sketch / Anime Sketchformer
-
+# Sketch Generation from Text
 This repository prepares anime portrait sketches as vector stroke sequences and
 experiments with scaling the 2020 Sketchformer idea to more complex anime-style
 line art.
