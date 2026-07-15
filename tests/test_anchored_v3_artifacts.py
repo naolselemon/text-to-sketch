@@ -54,14 +54,38 @@ def encoded_sample(
 
 
 class AnchoredV3ArtifactTest(unittest.TestCase):
-    def test_production_source_floor_cannot_be_bypassed_by_builder_override(self) -> None:
-        metadata = {"preparation": {"accepted_source_sketches": 24_999}}
-        with self.assertRaisesRegex(ValueError, "at least 25000"):
-            require_minimum_source_sketches(metadata)
-        with self.assertRaises(TypeError):
-            require_minimum_source_sketches(metadata, minimum=1)
-        metadata["preparation"]["accepted_source_sketches"] = 25_000
-        self.assertEqual(require_minimum_source_sketches(metadata), 25_000)
+    def test_source_floor_uses_an_explicit_positive_minimum(self) -> None:
+        metadata = {"preparation": {"accepted_source_sketches": 7_942}}
+
+        self.assertEqual(
+            require_minimum_source_sketches(metadata, minimum=7_942),
+            7_942,
+        )
+        with self.assertRaisesRegex(ValueError, "at least 7943"):
+            require_minimum_source_sketches(metadata, minimum=7_943)
+        for invalid_minimum in (0, -1):
+            with self.subTest(minimum=invalid_minimum), self.assertRaisesRegex(
+                ValueError,
+                "minimum.*positive",
+            ):
+                require_minimum_source_sketches(
+                    metadata,
+                    minimum=invalid_minimum,
+                )
+
+    def test_source_floor_rejects_missing_or_invalid_preparation_metadata(self) -> None:
+        invalid_metadata = (
+            {},
+            {"preparation": None},
+            {"preparation": {}},
+            {"preparation": {"accepted_source_sketches": "not-a-number"}},
+        )
+
+        for metadata in invalid_metadata:
+            with self.subTest(metadata=metadata), self.assertRaises(
+                (TypeError, ValueError),
+            ):
+                require_minimum_source_sketches(metadata, minimum=1)
 
     def test_atomic_dataset_round_trip_records_contract_and_rejections(self) -> None:
         samples = [

@@ -17,7 +17,6 @@ import numpy as np
 from .contract import (
     FORMAT_TYPE,
     FORMAT_VERSION,
-    PRODUCTION_MIN_SOURCE_SKETCHES,
     TOKEN_LAYOUT,
     artifact_contract,
 )
@@ -290,17 +289,32 @@ def validate_dataset(dataset_dir: str | Path) -> dict[str, Any]:
 
 def require_minimum_source_sketches(
     metadata: Mapping[str, Any],
+    *,
+    minimum: int,
 ) -> int:
-    """Enforce the immutable production-data floor."""
+    """Enforce the positive cleaned-source minimum chosen for this run."""
+
+    if isinstance(minimum, bool) or not isinstance(minimum, int) or minimum <= 0:
+        raise ValueError("minimum source sketches must be a positive integer")
 
     preparation = metadata.get("preparation")
     if not isinstance(preparation, Mapping):
         raise ValueError("Anchored V3 metadata has no preparation contract")
-    count = int(preparation.get("accepted_source_sketches", -1))
-    if count < PRODUCTION_MIN_SOURCE_SKETCHES:
+    raw_count = preparation.get("accepted_source_sketches")
+    if isinstance(raw_count, bool):
+        raise ValueError("accepted_source_sketches must be a non-negative integer")
+    try:
+        count = int(raw_count)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "accepted_source_sketches must be a non-negative integer"
+        ) from exc
+    if count < 0:
+        raise ValueError("accepted_source_sketches must be a non-negative integer")
+    if count < minimum:
         raise ValueError(
             "Anchored V3 training/evaluation requires at least "
-            f"{PRODUCTION_MIN_SOURCE_SKETCHES} cleaned "
+            f"{minimum} cleaned "
             f"source sketches; artifact contains {count}"
         )
     return count

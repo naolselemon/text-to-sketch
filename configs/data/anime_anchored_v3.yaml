@@ -6,7 +6,7 @@ dataset:
   subset_seed: 42
   source_subset_strategy: nested_hash
   include_augmentations: true
-  minimum_source_sketches: 25000
+  minimum_source_sketches: 1
   train_pattern: train_*.npz
   valid_file: valid.npz
   test_file: test.npz

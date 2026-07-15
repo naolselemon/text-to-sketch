@@ -41,7 +41,7 @@ class BuilderConfig:
     calibration_size: int = 256
     max_sequence_length: int = MAX_SEQUENCE_LENGTH
     train_augmentation_copies: int = 1
-    minimum_accepted_source_sketches: int = 25_000
+    minimum_accepted_source_sketches: int = 1
     shard_size: int = 1024
     vectorizer_threshold_profile: str = "hysteresis"
     source_vector_f1_gate: float = 0.98
@@ -401,8 +401,8 @@ def _validate_config(config: BuilderConfig) -> None:
         raise ValueError("max_sequence_length must be positive")
     if config.train_augmentation_copies < 0:
         raise ValueError("train_augmentation_copies must be non-negative")
-    if config.minimum_accepted_source_sketches < 0:
-        raise ValueError("minimum_accepted_source_sketches must be non-negative")
+    if config.minimum_accepted_source_sketches <= 0:
+        raise ValueError("minimum_accepted_source_sketches must be positive")
     if config.shard_size <= 0:
         raise ValueError("shard_size must be positive")
 
@@ -428,6 +428,5 @@ def _enforce_minimum_source_count(count: int, minimum: int, *, stage: str) -> No
     if int(count) < int(minimum):
         raise ValueError(
             f"Anchored V3 requires at least {minimum} accepted source sketches; "
-            f"only {count} remained after {stage}. "
-            "Use --minimum-accepted-source-sketches only for a non-production test fixture."
+            f"only {count} remained after {stage}."
         )

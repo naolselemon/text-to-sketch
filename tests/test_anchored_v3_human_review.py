@@ -86,6 +86,7 @@ class AnchoredV3HumanReviewTest(unittest.TestCase):
                 "max_generation_length": None,
                 "enforce_v3_gates": True,
                 "allow_legacy_checkpoint": False,
+                "minimum_source_sketches": 1,
                 "token_layout": TOKEN_LAYOUT.to_dict(),
                 "decoder_memory_source": "encoder",
                 "checkpoint_contract": {
@@ -103,6 +104,10 @@ class AnchoredV3HumanReviewTest(unittest.TestCase):
         ]["decoder"]["memory_source"] = "latent_expander"
         with self.assertRaisesRegex(ValueError, "not canonical anchored V3"):
             validate_release_evaluation_report(latent_report)
+        mismatched_minimum = copy.deepcopy(evaluation)
+        mismatched_minimum["metadata"]["minimum_source_sketches"] = 2
+        with self.assertRaisesRegex(ValueError, "does not match checkpoint"):
+            validate_release_evaluation_report(mismatched_minimum)
         with tempfile.TemporaryDirectory() as tmp:
             plot = Path(tmp) / "plot.png"
             plot.write_bytes(b"plot-v1")

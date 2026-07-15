@@ -44,7 +44,9 @@ from metrics.sketchformer.free_running import (
     free_running_reconstruction_records,
 )
 from scripts.sketchformer.config import (
+    apply_minimum_source_override,
     compose_training_config,
+    configured_minimum_source_sketches,
     format_logs,
     limited,
     parse_batch_limit,
@@ -78,6 +80,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="Match a nested training-subset value stored in a strict checkpoint.",
+    )
+    parser.add_argument(
+        "--minimum-source-sketches",
+        type=int,
+        default=None,
+        help="Match the cleaned-source minimum stored by the training run.",
     )
     parser.add_argument("--device", default="auto")
     parser.add_argument("--precision", default=None)
@@ -131,6 +139,24 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     return parser.parse_args()
+
+
+def _apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> None:
+    apply_minimum_source_override(config, args.minimum_source_sketches)
+    if args.data_root:
+        config["data"]["dataset"]["root"] = args.data_root
+        if str(get_nested(config, "data.format.type")) == "anchored_v3":
+            config["data"]["format"]["token_dictionary"]["codebook_path"] = str(
+                Path(args.data_root) / "codebook.npy"
+            )
+    if args.train_source_limit is not None:
+        if args.train_source_limit <= 0:
+            raise ValueError("--train-source-limit must be positive")
+        config["data"]["dataset"]["train_source_limit"] = args.train_source_limit
+    if args.precision:
+        config.setdefault("trainer", {}).setdefault("runtime", {})[
+            "precision"
+        ] = args.precision
 
 
 def _codebook_path(config: dict[str, Any]) -> Path | None:
@@ -296,18 +322,7 @@ def main() -> int:
     if (args.enforce_long_sequence_gates or args.enforce_v2_gates or args.enforce_v3_gates) and args.decode_mode != "free-running":
         raise ValueError("release gates require --decode-mode free-running")
     config = compose_training_config(args.config, experiment=args.experiment)
-    if args.data_root:
-        config["data"]["dataset"]["root"] = args.data_root
-        if str(get_nested(config, "data.format.type")) == "anchored_v3":
-            config["data"]["format"]["token_dictionary"]["codebook_path"] = str(
-                Path(args.data_root) / "codebook.npy"
-            )
-    if args.train_source_limit is not None:
-        if args.train_source_limit <= 0:
-            raise ValueError("--train-source-limit must be positive")
-        config["data"]["dataset"]["train_source_limit"] = args.train_source_limit
-    if args.precision:
-        config.setdefault("trainer", {}).setdefault("runtime", {})["precision"] = args.precision
+    _apply_cli_overrides(config, args)
     _validate_evaluation_request(args, config)
     pin_anchored_v3_artifacts(config, project_root=PROJECT_ROOT)
 
@@ -334,6 +349,7 @@ def main() -> int:
             raise ValueError("Anchored V3 evaluation dataset has no validated metadata")
         require_minimum_source_sketches(
             metadata,
+            minimum=configured_minimum_source_sketches(config),
         )
 
     raw_model = build_model(config["model"])
@@ -492,6 +508,11 @@ def main() -> int:
                 "limit_batches": args.limit_batches,
                 "format_type": get_nested(config, "data.format.type"),
                 "format_version": get_nested(config, "data.format.version"),
+                "minimum_source_sketches": (
+                    configured_minimum_source_sketches(config)
+                    if str(get_nested(config, "data.format.type")) == "anchored_v3"
+                    else None
+                ),
                 "token_layout": (
                     ANCHORED_V3_TOKEN_LAYOUT.to_dict()
                     if str(get_nested(config, "data.format.type")) == "anchored_v3"

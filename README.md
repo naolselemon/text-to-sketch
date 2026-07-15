@@ -393,9 +393,13 @@ resume V2 training checkpoints. Each stroke begins with absolute X/Y tokens on
 a fixed 256×256 canvas and then uses within-stroke motion tokens, so an error in
 one stroke cannot move every later stroke.
 
-### 1. Prepare and pin the full dataset
+### 1. Prepare and pin the dataset
 
-Start from at least 25,000 cleaned line-art images. Preparation performs the
+Choose a positive cleaned-source minimum for the run. There is no hardcoded
+dataset-size floor; `1` accepts any nonempty validated artifact, while a larger
+value makes preparation fail if cleaning, deduplication, or encoding leaves too
+few originals. For a 7,942-image collection, choose a value no larger than the
+number expected to survive those steps. Preparation performs the
 deterministic cleaning, deduplication, grouped 80/10/10 split, train-only
 augmentation, RDP gate sweep, 2,048-center training-only codebook fit, token
 encoding, and atomic artifact publication. The RDP sweep measures the simplified
@@ -409,7 +413,7 @@ tts-prepare-sketchformer-v3 build \
   --seed 42 \
   --calibration-size 256 \
   --augmentation-copies 1 \
-  --minimum-accepted-source-sketches 25000 \
+  --minimum-accepted-source-sketches 1 \
   --shard-size 1024
 ```
 
@@ -425,10 +429,10 @@ tts-prepare-sketchformer-v3 validate \
 Training and evaluation resolve `current` once to the immutable content-hashed
 directory. Retargeting the symlink cannot switch shards during a running job.
 A V3 checkpoint records and verifies the resolved config plus manifest and
-codebook SHA-256 digests. Production jobs reject artifacts containing fewer
-than 25,000 accepted original sources even if a test fixture was prepared with
-a lower CLI threshold. This floor is a code-level constant; changing
-`data.dataset.minimum_source_sketches` cannot lower it.
+codebook SHA-256 digests. Training, overfit checking, and evaluation accept
+`--minimum-source-sketches N`; use the same positive value for each command in
+a run. The selected value is part of strict checkpoint compatibility, so resume
+or evaluation with a different value is rejected.
 
 ### 2. Initialize compatible transformer blocks
 
@@ -463,12 +467,14 @@ corruption disabled.
 ```bash
 tts-train-sketchformer \
   --experiment anime_anchored_v3_overfit \
+  --minimum-source-sketches 1 \
   --pretrained weights/pretrained/sketchformer_anchored_v3_transformer_init.pt \
   --device cuda \
   --precision 32-true
 
 tts-check-sketchformer-v3-overfit \
   --experiment anime_anchored_v3_overfit \
+  --minimum-source-sketches 1 \
   --checkpoint weights/finetuned/sketchformer-anchored-v3-overfit/best.pt \
   --device cuda \
   --expected-samples 32 \
@@ -491,6 +497,7 @@ populations.
 ```bash
 tts-train-sketchformer \
   --experiment anime_anchored_v3_direct \
+  --minimum-source-sketches 1 \
   --pretrained weights/pretrained/sketchformer_anchored_v3_transformer_init.pt \
   --overfit-gate-report data/processed/evaluations/anchored_v3_overfit_gate.json \
   --device cuda \
@@ -505,6 +512,7 @@ restart:
 ```bash
 tts-train-sketchformer \
   --experiment anime_anchored_v3_direct \
+  --minimum-source-sketches 1 \
   --resume weights/finetuned/sketchformer-anchored-v3-direct/last.pt \
   --overfit-gate-report data/processed/evaluations/anchored_v3_overfit_gate.json \
   --device cuda \
@@ -516,6 +524,7 @@ tts-train-sketchformer \
 ```bash
 tts-evaluate-sketchformer \
   --experiment anime_anchored_v3_direct \
+  --minimum-source-sketches 1 \
   --checkpoint weights/finetuned/sketchformer-anchored-v3-direct/best.pt \
   --split test \
   --device cuda \
@@ -546,32 +555,33 @@ plot. The validator rejects changed plots, a different checkpoint report,
 partial/non-test evaluation, a legacy checkpoint, or adjustable sample/pass
 thresholds.
 
-### 6. Run the fixed-membership scaling study
+### 6. Run a fixed-membership scaling study
 
-Use the same pinned dataset root for all four runs. `--train-source-limit`
-chooses source IDs by a stable seeded hash, so 1,400 ⊂ 5,000 ⊂ 10,000 ⊂ full
-without changing validation/test membership, the codebook, or manifest.
+Choose any increasing positive source limits that fit the accepted training
+split, then add the full split as the final point. Use the same pinned dataset
+root for every run. `--train-source-limit` chooses source IDs by a stable seeded
+hash, so the chosen limited sets are nested without changing validation/test
+membership, the codebook, or manifest. For example, a dataset with 7,942 total
+sources can use 1,400, 5,000, and full when at least 5,000 originals remain in
+its cleaned training split.
 
 ```bash
 tts-train-sketchformer --experiment anime_anchored_v3_direct \
+  --minimum-source-sketches 1 \
   --train-source-limit 1400 \
   --output-dir weights/finetuned/sketchformer-anchored-v3-scale-1400 \
   --overfit-gate-report data/processed/evaluations/anchored_v3_overfit_gate.json \
   --device cuda --precision bf16-mixed
 
 tts-train-sketchformer --experiment anime_anchored_v3_direct \
+  --minimum-source-sketches 1 \
   --train-source-limit 5000 \
   --output-dir weights/finetuned/sketchformer-anchored-v3-scale-5000 \
   --overfit-gate-report data/processed/evaluations/anchored_v3_overfit_gate.json \
   --device cuda --precision bf16-mixed
 
 tts-train-sketchformer --experiment anime_anchored_v3_direct \
-  --train-source-limit 10000 \
-  --output-dir weights/finetuned/sketchformer-anchored-v3-scale-10000 \
-  --overfit-gate-report data/processed/evaluations/anchored_v3_overfit_gate.json \
-  --device cuda --precision bf16-mixed
-
-tts-train-sketchformer --experiment anime_anchored_v3_direct \
+  --minimum-source-sketches 1 \
   --output-dir weights/finetuned/sketchformer-anchored-v3-scale-full \
   --overfit-gate-report data/processed/evaluations/anchored_v3_overfit_gate.json \
   --device cuda --precision bf16-mixed
@@ -583,6 +593,7 @@ Example:
 
 ```bash
 tts-evaluate-sketchformer --experiment anime_anchored_v3_direct \
+  --minimum-source-sketches 1 \
   --train-source-limit 1400 \
   --checkpoint weights/finetuned/sketchformer-anchored-v3-scale-1400/best.pt \
   --split test --device cuda --precision bf16-mixed \
@@ -590,29 +601,32 @@ tts-evaluate-sketchformer --experiment anime_anchored_v3_direct \
   --metrics-output data/processed/evaluations/anchored_v3_scale_1400_test.json
 ```
 
-Repeat the evaluation with limits `5000` and `10000`. Omit the limit for the
+Repeat the evaluation for every chosen limited point. Omit the limit for the
 full run. Change the checkpoint and report name together, then validate and
-aggregate the same ordered test records across all four reports:
+aggregate the same ordered test records. Pass each numeric limit with its
+matching evaluation path and include exactly one `full` report:
 
 ```bash
 tts-build-sketchformer-v3-scaling-curve \
-  --report-1400 data/processed/evaluations/anchored_v3_scale_1400_test.json \
-  --report-5000 data/processed/evaluations/anchored_v3_scale_5000_test.json \
-  --report-10000 data/processed/evaluations/anchored_v3_scale_10000_test.json \
-  --report-full data/processed/evaluations/anchored_v3_scale_full_test.json \
+  --report 1400 data/processed/evaluations/anchored_v3_scale_1400_test.json \
+  --report 5000 data/processed/evaluations/anchored_v3_scale_5000_test.json \
+  --report full data/processed/evaluations/anchored_v3_scale_full_test.json \
   --output data/processed/evaluations/anchored_v3_scaling_curve.json
 ```
 
 The aggregator recomputes metrics from every per-sketch record and rejects a
 different manifest, codebook, test order, subset limit, partial evaluation, or
-edited aggregate.
+edited aggregate. It requires at least one limited point plus the full point.
+The legacy `--report-1400`, `--report-5000`, `--report-10000`, and
+`--report-full` interface remains available when all four are supplied.
 
 If the narrow model passes the 32-sketch gate but both full-scale training and
-validation median F1@2px are below `0.90`, rerun the 10k and full studies with
-`--experiment anime_anchored_v3_wide`. That conditional config changes only
-V3 capacity to 256 dimensions, six encoder/decoder layers, and a 1024-unit
-feed-forward block. Measure training F1 with the same evaluator using
-`--split train`; keep the checkpoint's matching `--train-source-limit` value.
+validation median F1@2px are below `0.90`, rerun the largest limited point and
+the full study with `--experiment anime_anchored_v3_wide`. That conditional
+config changes only V3 capacity to 256 dimensions, six encoder/decoder layers,
+and a 1024-unit feed-forward block. Measure training F1 with the same evaluator
+using `--split train`; keep the checkpoint's matching `--train-source-limit`
+value.
 Create its complete initialization artifact first:
 
 ```bash

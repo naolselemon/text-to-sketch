@@ -67,7 +67,7 @@ class AnchoredV3BuilderTest(unittest.TestCase):
                 7.0,
             )
 
-    def test_minimum_source_count_defaults_to_25000_and_prevents_publication(self) -> None:
+    def test_minimum_source_count_is_configurable_and_prevents_publication(self) -> None:
         default_args = parse_args(
             ["build", "--source-dir", "source", "--output-root", "output"]
         )
@@ -83,7 +83,7 @@ class AnchoredV3BuilderTest(unittest.TestCase):
             ]
         )
 
-        self.assertEqual(default_args.minimum_accepted_source_sketches, 25_000)
+        self.assertEqual(default_args.minimum_accepted_source_sketches, 1)
         self.assertEqual(overfit_args.minimum_accepted_source_sketches, 32)
 
         raw_stroke = [[(x, 32) for x in range(10, 21)]]

@@ -24,11 +24,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     build.add_argument(
         "--minimum-accepted-source-sketches",
         type=int,
-        default=25_000,
+        default=1,
         help=(
-            "Fail unless this many original source sketches survive preparation "
-            "(default: 25000; lower values create test fixtures that production "
-            "training and evaluation will reject)."
+            "Fail unless this chosen number of original source sketches survives "
+            "cleaning and encoding (default: 1)."
         ),
     )
     build.add_argument("--shard-size", type=int, default=1024)

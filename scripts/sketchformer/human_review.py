@@ -216,6 +216,28 @@ def validate_release_evaluation_report(
                 validate_anchored_v3_runtime_config(compatibility_config)
             except ValueError as exc:
                 mismatches.append(f"checkpoint is not canonical anchored V3: {exc}")
+            checkpoint_data = compatibility_config.get("data")
+            checkpoint_dataset = (
+                checkpoint_data.get("dataset")
+                if isinstance(checkpoint_data, Mapping)
+                else None
+            )
+            configured_minimum = (
+                checkpoint_dataset.get("minimum_source_sketches")
+                if isinstance(checkpoint_dataset, Mapping)
+                else None
+            )
+            report_minimum = metadata.get("minimum_source_sketches")
+            if (
+                isinstance(report_minimum, bool)
+                or not isinstance(report_minimum, int)
+                or report_minimum <= 0
+            ):
+                mismatches.append("evaluation minimum_source_sketches is not positive")
+            elif configured_minimum != report_minimum:
+                mismatches.append(
+                    "evaluation minimum_source_sketches does not match checkpoint"
+                )
     if metadata.get("token_layout") != TOKEN_LAYOUT.to_dict():
         mismatches.append("evaluation token layout is not canonical anchored V3")
     if metadata.get("decoder_memory_source") != "encoder":

@@ -86,7 +86,10 @@ class CheckpointContractV3Test(unittest.TestCase):
         base = CheckpointContract(
             config={
                 "model": {"name": "tiny", "width": 2},
-                "data": {"format": {"version": 3}},
+                "data": {
+                    "format": {"version": 3},
+                    "dataset": {"minimum_source_sketches": 7_942},
+                },
                 "experiment": {
                     "run": {"output_dir": "first", "resume_from_checkpoint": None},
                     "pretrained": {"path": "initial.pt"},
@@ -122,6 +125,19 @@ class CheckpointContractV3Test(unittest.TestCase):
             dataset_manifest_sha256="b" * 64,
             git_commit="c" * 40,
         )
+        changed_minimum = CheckpointContract(
+            config={
+                **moved.config,
+                "data": {
+                    **moved.config["data"],
+                    "dataset": {"minimum_source_sketches": 7_943},
+                },
+            },
+            token_layout_version=3,
+            codebook_sha256="a" * 64,
+            dataset_manifest_sha256="b" * 64,
+            git_commit="c" * 40,
+        )
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "model.pt"
             save_checkpoint(path, self.model, contract=base, require_contract=True)
@@ -140,6 +156,16 @@ class CheckpointContractV3Test(unittest.TestCase):
                     path,
                     torch.nn.Linear(2, 2),
                     expected_contract=changed_model,
+                    require_contract=True,
+                )
+            with self.assertRaisesRegex(
+                CheckpointContractError,
+                "compatibility_config",
+            ):
+                load_checkpoint(
+                    path,
+                    torch.nn.Linear(2, 2),
+                    expected_contract=changed_minimum,
                     require_contract=True,
                 )
 

@@ -130,6 +130,32 @@ def pin_anchored_v3_artifacts(
     return resolved_root
 
 
+def configured_minimum_source_sketches(config: dict[str, Any]) -> int:
+    """Return the positive cleaned-source minimum selected by the run config."""
+
+    value = get_nested(config, "data.dataset.minimum_source_sketches", 1)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(
+            "data.dataset.minimum_source_sketches must be a positive integer"
+        )
+    return value
+
+
+def apply_minimum_source_override(
+    config: dict[str, Any],
+    value: int | None,
+) -> None:
+    """Apply a CLI-selected cleaned-source contract after positive validation."""
+
+    if value is None:
+        return
+    if isinstance(value, bool) or value <= 0:
+        raise ValueError("--minimum-source-sketches must be positive")
+    config.setdefault("data", {}).setdefault("dataset", {})[
+        "minimum_source_sketches"
+    ] = int(value)
+
+
 def _sync_token_dictionary_config(config: dict[str, Any]) -> None:
     """Keep tok-dict data/model vocabulary IDs from drifting apart."""
 

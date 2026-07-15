@@ -89,26 +89,29 @@ thresholds.
 The configured `data.dataset.root`, `manifest.jsonl`, and `codebook.npy` are a
 single immutable unit. Checkpoints store their hashes plus the full composed
 config, a strict compatibility projection, and token-layout version. The
-runtime resolves the `current` symlink once to its content-hashed directory and
-rejects artifacts with fewer than 25,000 accepted original sources. The
-25,000-source check is immutable in code; the similarly named config field is
-provenance, not a supported override. Explicit manifest paths are rejected
-unless they resolve to that same pinned artifact. The
+runtime resolves the `current` symlink once to its content-hashed directory.
+`data.dataset.minimum_source_sketches` is a positive configurable cleaned-source
+floor, defaults to `1`, and can be overridden consistently with
+`--minimum-source-sketches`. It remains in checkpoint compatibility so resume
+and evaluation cannot silently change the selected requirement. Explicit
+manifest paths are rejected unless they resolve to that same pinned artifact.
+The
 projection excludes only operational output/resume/initialization/report paths.
 Resume and evaluation therefore require the same model, data, training, and
 pinned artifact settings. Do not retarget the `current` dataset symlink during
 a run. V2 checkpoints remain under V2 configs and cannot resume V3.
 
-For the scaling study, keep one immutable root and pass
-`--train-source-limit 1400`, `5000`, or `10000`. The manifest reader uses one
-seeded ordering, so the subsets are nested while validation/test membership and
-the codebook stay fixed. Omit the option for the full training split and pass
-the same limit to strict evaluation. Use
-`tts-build-sketchformer-v3-scaling-curve` to verify identical held-out sample
-order and aggregate all four reports.
+For a scaling study, keep one immutable root and choose any increasing positive
+`--train-source-limit` values that do not exceed the number of accepted original
+training sketches. The manifest reader uses one seeded ordering, so the subsets
+are nested while validation/test membership and the codebook stay fixed. Omit
+the option for the full training split and pass the same limit to strict
+evaluation. Use repeatable `tts-build-sketchformer-v3-scaling-curve --report
+LIMIT PATH` arguments, with one final `--report full PATH`, to verify identical
+held-out sample order and aggregate the reports.
 
 If both full-scale train and validation median F1@2px remain more than 0.05
 below the 0.95 target after the narrow model passes the overfit gate, use
 `anime_anchored_v3_wide`. It changes only V3 capacity to `d_model=256`, six
-encoder/decoder layers, and a 1024-wide feed-forward block. Rerun only the 10k
-and full stages; do not widen V2.
+encoder/decoder layers, and a 1024-wide feed-forward block. Rerun only the
+largest limited point and full stages; do not widen V2.

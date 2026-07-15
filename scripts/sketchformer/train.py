@@ -46,8 +46,10 @@ from core import (
 from core.metrics import reconstruction_metrics
 from dataloaders import StrokeSequenceDataModule
 from scripts.sketchformer.config import (
+    apply_minimum_source_override,
     batch_limit,
     compose_training_config,
+    configured_minimum_source_sketches,
     format_logs,
     limited,
     parse_batch_limit,
@@ -77,6 +79,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Use a deterministic nested subset of this many original train sketches.",
     )
+    parser.add_argument(
+        "--minimum-source-sketches",
+        type=int,
+        default=None,
+        help="Require this many cleaned original sources in the V3 artifact.",
+    )
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--pretrained", default=None)
     parser.add_argument("--resume", default=None)
@@ -91,6 +99,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def _apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> None:
+    apply_minimum_source_override(config, args.minimum_source_sketches)
     if args.data_root:
         config["data"]["dataset"]["root"] = args.data_root
         if str(get_nested(config, "data.format.type")) == "anchored_v3":
@@ -606,6 +615,7 @@ def _require_production_v3_dataset(config: dict[str, Any], datamodule: Any) -> N
         raise ValueError("Anchored V3 training dataset has no validated metadata")
     require_minimum_source_sketches(
         metadata,
+        minimum=configured_minimum_source_sketches(config),
     )
 
 
@@ -677,6 +687,10 @@ def main() -> int:
         print(f"experiment={get_nested(config, 'experiment.name')}")
         print(f"data_root={get_nested(config, 'data.dataset.root')}")
         print(f"train_source_limit={get_nested(config, 'data.dataset.train_source_limit')}")
+        print(
+            "minimum_source_sketches="
+            f"{configured_minimum_source_sketches(config)}"
+        )
         print(f"model={get_nested(config, 'model.name')}")
         print(f"device={device}")
         print(f"precision={precision.effective}")

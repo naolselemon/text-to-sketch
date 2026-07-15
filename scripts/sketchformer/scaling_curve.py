@@ -1,6 +1,6 @@
 """Build a deterministic anchored-V3 train-source scaling-curve report.
 
-The four input reports must be complete held-out test evaluations produced by
+Input reports must be complete held-out test evaluations produced by
 ``scripts.sketchformer.evaluate``.  This utility deliberately consumes the
 per-sample records as well as the aggregate metrics so a stale or manually
 edited summary cannot enter the scaling curve unnoticed.
@@ -25,12 +25,15 @@ import numpy as np
 
 
 SCALING_CURVE_SCHEMA_VERSION = 1
-REPORT_SPECS: tuple[tuple[str, int | None], ...] = (
+LEGACY_REPORT_SPECS: tuple[tuple[str, int | None], ...] = (
     ("1400", 1_400),
     ("5000", 5_000),
     ("10000", 10_000),
     ("full", None),
 )
+# Public compatibility alias retained for callers that imported the original
+# fixed study definition.  New studies derive their points from report labels.
+REPORT_SPECS = LEGACY_REPORT_SPECS
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _SUMMARY_TOLERANCE = 1.0e-6
 _METRIC_KEYS: tuple[tuple[str, str], ...] = (
@@ -61,10 +64,37 @@ class ValidatedEvaluation:
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--report-1400", required=True)
-    parser.add_argument("--report-5000", required=True)
-    parser.add_argument("--report-10000", required=True)
-    parser.add_argument("--report-full", required=True)
+    parser.add_argument(
+        "--report",
+        action="append",
+        nargs=2,
+        default=None,
+        metavar=("LIMIT", "PATH"),
+        help=(
+            "Add a scaling point. LIMIT is a positive train-source limit or "
+            "'full'. Repeat for every point."
+        ),
+    )
+    parser.add_argument(
+        "--report-1400",
+        default=None,
+        help="Legacy alias for --report 1400 PATH.",
+    )
+    parser.add_argument(
+        "--report-5000",
+        default=None,
+        help="Legacy alias for --report 5000 PATH.",
+    )
+    parser.add_argument(
+        "--report-10000",
+        default=None,
+        help="Legacy alias for --report 10000 PATH.",
+    )
+    parser.add_argument(
+        "--report-full",
+        default=None,
+        help="Legacy alias for --report full PATH.",
+    )
     parser.add_argument("--output", required=True)
     return parser.parse_args(argv)
 
@@ -72,23 +102,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def build_scaling_curve(
     report_paths: Mapping[str, str | Path],
 ) -> dict[str, Any]:
-    """Validate all four reports and return a stable, path-independent payload."""
-
-    expected_labels = {label for label, _ in REPORT_SPECS}
-    actual_labels = set(report_paths)
-    if actual_labels != expected_labels:
-        raise ScalingCurveValidationError(
-            "Scaling reports must contain exactly "
-            f"{sorted(expected_labels)}; got {sorted(actual_labels)}"
-        )
+    """Validate an arbitrary nested study and return a stable payload."""
 
     reports = [
         load_evaluation_report(
-            report_paths[label],
+            path,
             label=label,
             expected_train_source_limit=expected_limit,
         )
-        for label, expected_limit in REPORT_SPECS
+        for label, expected_limit, path in _normalize_report_specs(report_paths)
     ]
     reference = reports[0]
     for report in reports[1:]:
@@ -132,6 +154,62 @@ def build_scaling_curve(
             for report in reports
         ],
     }
+
+
+def _normalize_report_specs(
+    report_paths: Mapping[str, str | Path],
+) -> tuple[tuple[str, int | None, str | Path], ...]:
+    """Canonicalize, validate, and order arbitrary scaling points."""
+
+    if not isinstance(report_paths, Mapping):
+        raise ScalingCurveValidationError("Scaling reports must be a mapping")
+    if len(report_paths) < 2:
+        raise ScalingCurveValidationError(
+            "Scaling study requires at least two reports, including 'full'"
+        )
+
+    normalized: dict[str, tuple[int | None, str | Path]] = {}
+    for raw_label, path in report_paths.items():
+        label, limit = _parse_report_label(raw_label)
+        if label in normalized:
+            raise ScalingCurveValidationError(
+                f"Duplicate scaling report limit {label!r}"
+            )
+        normalized[label] = (limit, path)
+
+    if "full" not in normalized:
+        raise ScalingCurveValidationError(
+            "Scaling study requires exactly one 'full' report"
+        )
+
+    ordered = sorted(
+        (
+            (label, limit, path)
+            for label, (limit, path) in normalized.items()
+        ),
+        key=lambda item: (item[1] is None, item[1] if item[1] is not None else 0),
+    )
+    return tuple(ordered)
+
+
+def _parse_report_label(raw_label: Any) -> tuple[str, int | None]:
+    if not isinstance(raw_label, str):
+        raise ScalingCurveValidationError(
+            f"Scaling report limit must be a string; got {raw_label!r}"
+        )
+    label = raw_label.strip().lower()
+    if label == "full":
+        return "full", None
+    if not label.isdecimal():
+        raise ScalingCurveValidationError(
+            f"Scaling report limit {raw_label!r} must be a positive integer or 'full'"
+        )
+    limit = int(label)
+    if limit <= 0:
+        raise ScalingCurveValidationError(
+            f"Scaling report limit {raw_label!r} must be positive"
+        )
+    return str(limit), limit
 
 
 def load_evaluation_report(
@@ -538,15 +616,46 @@ def _reject_nonfinite_json_constant(value: str) -> Any:
     raise ScalingCurveValidationError(f"Non-finite JSON constant {value!r}")
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    args = parse_args(argv)
-    paths = {
+def _report_paths_from_args(args: argparse.Namespace) -> dict[str, str]:
+    generic_reports = list(args.report or [])
+    legacy_values = {
         "1400": args.report_1400,
         "5000": args.report_5000,
         "10000": args.report_10000,
         "full": args.report_full,
     }
+    supplied_legacy = {label: path for label, path in legacy_values.items() if path}
+    if generic_reports and supplied_legacy:
+        raise ScalingCurveValidationError(
+            "Do not mix repeatable --report arguments with legacy --report-* arguments"
+        )
+    if generic_reports:
+        paths: dict[str, str] = {}
+        for raw_label, path in generic_reports:
+            label, _ = _parse_report_label(raw_label)
+            if label in paths:
+                raise ScalingCurveValidationError(
+                    f"Duplicate scaling report limit {label!r}"
+                )
+            paths[label] = path
+        return paths
+    if supplied_legacy:
+        missing = [label for label, path in legacy_values.items() if not path]
+        if missing:
+            raise ScalingCurveValidationError(
+                "Legacy scaling mode requires all of --report-1400, --report-5000, "
+                "--report-10000, and --report-full; missing " + ", ".join(missing)
+            )
+        return {label: str(path) for label, path in legacy_values.items()}
+    raise ScalingCurveValidationError(
+        "Provide repeatable --report LIMIT PATH arguments or all four legacy reports"
+    )
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_args(argv)
     try:
+        paths = _report_paths_from_args(args)
         payload = build_scaling_curve(paths)
         output = write_json_atomic(args.output, payload)
     except (ScalingCurveValidationError, OSError, TypeError, ValueError) as exc:

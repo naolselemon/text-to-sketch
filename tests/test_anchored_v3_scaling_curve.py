@@ -91,9 +91,13 @@ def evaluation_report(
 
 
 class AnchoredV3ScalingCurveTest(unittest.TestCase):
-    def _write_reports(self, directory: Path) -> dict[str, Path]:
+    def _write_reports(
+        self,
+        directory: Path,
+        limits: dict[str, int | None] | None = None,
+    ) -> dict[str, Path]:
         paths: dict[str, Path] = {}
-        for label, limit in REPORT_LIMITS.items():
+        for label, limit in (limits or REPORT_LIMITS).items():
             path = directory / f"evaluation-{label}.json"
             path.write_text(
                 json.dumps(evaluation_report(limit), sort_keys=True),
@@ -129,6 +133,57 @@ class AnchoredV3ScalingCurveTest(unittest.TestCase):
             self.assertEqual(first["points"][0]["p95_chamfer_px"], 2.9)
             self.assertEqual(first["points"][0]["premature_eos_rate"], 0.0)
             self.assertEqual(first["points"][0]["max_length_hit_rate"], 0.5)
+
+    def test_builds_arbitrary_curve_in_numeric_order_with_full_last(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = self._write_reports(
+                root,
+                {"full": None, "5000": 5_000, "1400": 1_400},
+            )
+
+            result = build_scaling_curve(paths)
+
+            self.assertEqual(
+                [point["train_source_label"] for point in result["points"]],
+                ["1400", "5000", "full"],
+            )
+            self.assertEqual(
+                [point["train_source_limit"] for point in result["points"]],
+                [1_400, 5_000, None],
+            )
+
+    def test_rejects_invalid_arbitrary_point_definitions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = self._write_reports(root)
+            cases = {
+                "at least two": {"full": paths["full"]},
+                "exactly one 'full'": {
+                    "1400": paths["1400"],
+                    "5000": paths["5000"],
+                },
+                "must be positive": {
+                    "0": paths["1400"],
+                    "full": paths["full"],
+                },
+                "positive integer or 'full'": {
+                    "small": paths["1400"],
+                    "full": paths["full"],
+                },
+                "Duplicate scaling report limit": {
+                    "01400": paths["1400"],
+                    "1400": paths["1400"],
+                    "full": paths["full"],
+                },
+            }
+            for expected_error, reports in cases.items():
+                with self.subTest(expected_error=expected_error):
+                    with self.assertRaisesRegex(
+                        ScalingCurveValidationError,
+                        expected_error,
+                    ):
+                        build_scaling_curve(reports)
 
     def test_rejects_hash_sample_order_and_train_limit_mismatches(self) -> None:
         mutations = {
@@ -211,6 +266,94 @@ class AnchoredV3ScalingCurveTest(unittest.TestCase):
 
             self.assertNotEqual(exit_code, 0)
             self.assertEqual(output.read_text(encoding="utf-8"), "existing\n")
+
+    def test_repeatable_report_cli_accepts_arbitrary_points(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = self._write_reports(
+                root,
+                {"1400": 1_400, "5000": 5_000, "full": None},
+            )
+            output = root / "curve.json"
+
+            exit_code = main(
+                [
+                    "--report",
+                    "5000",
+                    str(paths["5000"]),
+                    "--report",
+                    "full",
+                    str(paths["full"]),
+                    "--report",
+                    "1400",
+                    str(paths["1400"]),
+                    "--output",
+                    str(output),
+                ]
+            )
+
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(
+                [point["train_source_label"] for point in payload["points"]],
+                ["1400", "5000", "full"],
+            )
+
+    def test_legacy_cli_still_accepts_all_four_named_reports(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = self._write_reports(root)
+            output = root / "curve.json"
+
+            exit_code = main(
+                [
+                    "--report-1400",
+                    str(paths["1400"]),
+                    "--report-5000",
+                    str(paths["5000"]),
+                    "--report-10000",
+                    str(paths["10000"]),
+                    "--report-full",
+                    str(paths["full"]),
+                    "--output",
+                    str(output),
+                ]
+            )
+
+            self.assertEqual(exit_code, 0)
+            self.assertTrue(output.is_file())
+
+    def test_cli_rejects_mixed_modes_and_duplicate_limits(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = self._write_reports(root)
+            output = root / "curve.json"
+            output.write_text("existing\n", encoding="utf-8")
+            cases = (
+                [
+                    "--report",
+                    "full",
+                    str(paths["full"]),
+                    "--report-1400",
+                    str(paths["1400"]),
+                ],
+                [
+                    "--report",
+                    "01400",
+                    str(paths["1400"]),
+                    "--report",
+                    "1400",
+                    str(paths["1400"]),
+                    "--report",
+                    "full",
+                    str(paths["full"]),
+                ],
+            )
+            for arguments in cases:
+                with self.subTest(arguments=arguments):
+                    exit_code = main(arguments + ["--output", str(output)])
+                    self.assertNotEqual(exit_code, 0)
+                    self.assertEqual(output.read_text(encoding="utf-8"), "existing\n")
 
 
 if __name__ == "__main__":

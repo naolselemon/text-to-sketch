@@ -85,8 +85,9 @@ artifact hashes, subset limits, or ordered test identities that differ.
 Checkpoint contract validation precedes tensor loading. A V3 evaluation aborts
 if the composed compatibility projection, token layout, manifest hash, or
 codebook hash differs. Release and human-review reports additionally prove the
-canonical token IDs and direct encoder-memory decoder. The complete config
-remains embedded for provenance;
+canonical token IDs and direct encoder-memory decoder. The configured
+cleaned-source minimum is also part of strict compatibility. The complete
+config remains embedded for provenance;
 only operational output/resume/initialization/report paths are excluded from
 comparison. `--allow-legacy-checkpoint` exists only for a trusted V2
 pre-contract checkpoint and still performs strict tensor-key loading.

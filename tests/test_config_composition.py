@@ -50,7 +50,7 @@ class ConfigCompositionTest(unittest.TestCase):
             )
         )
         self.assertIsNone(config["data"]["dataset"]["train_source_limit"])
-        self.assertEqual(config["data"]["dataset"]["minimum_source_sketches"], 25_000)
+        self.assertEqual(config["data"]["dataset"]["minimum_source_sketches"], 1)
         self.assertEqual(
             config["trainer"]["checkpointing"]["monitor"],
             "val/free_running/macro_geometry_f1_2px_median",

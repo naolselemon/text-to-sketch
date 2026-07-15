@@ -33,7 +33,9 @@ from core import checkpoint_compatibility_config, load_checkpoint, move_to_devic
 from dataloaders import StrokeSequenceDataModule
 from metrics.sketchformer.free_running import free_running_reconstruction_records
 from scripts.sketchformer.config import (
+    apply_minimum_source_override,
     compose_training_config,
+    configured_minimum_source_sketches,
     pin_anchored_v3_artifacts,
     resolve_device,
 )
@@ -59,6 +61,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--data-root", default=None)
     parser.add_argument("--train-source-limit", type=int, default=None)
+    parser.add_argument(
+        "--minimum-source-sketches",
+        type=int,
+        default=None,
+        help="Match the cleaned-source minimum selected for this V3 artifact.",
+    )
     parser.add_argument("--device", default="auto")
     parser.add_argument(
         "--output",
@@ -66,6 +74,19 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--expected-samples", type=int, default=EXPECTED_SAMPLE_COUNT)
     return parser.parse_args()
+
+
+def _apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> None:
+    apply_minimum_source_override(config, args.minimum_source_sketches)
+    if args.data_root:
+        config["data"]["dataset"]["root"] = args.data_root
+        config["data"]["format"]["token_dictionary"]["codebook_path"] = str(
+            Path(args.data_root) / "codebook.npy"
+        )
+    if args.train_source_limit is not None:
+        if args.train_source_limit <= 0:
+            raise ValueError("--train-source-limit must be positive")
+        config["data"]["dataset"]["train_source_limit"] = args.train_source_limit
 
 
 def evaluate_overfit_model(
@@ -367,15 +388,7 @@ def _json_safe_mapping(values: Mapping[str, Any]) -> dict[str, Any]:
 def main() -> int:
     args = parse_args()
     config = compose_training_config(args.config, experiment=args.experiment)
-    if args.data_root:
-        config["data"]["dataset"]["root"] = args.data_root
-        config["data"]["format"]["token_dictionary"]["codebook_path"] = str(
-            Path(args.data_root) / "codebook.npy"
-        )
-    if args.train_source_limit is not None:
-        if args.train_source_limit <= 0:
-            raise ValueError("--train-source-limit must be positive")
-        config["data"]["dataset"]["train_source_limit"] = args.train_source_limit
+    _apply_cli_overrides(config, args)
     pin_anchored_v3_artifacts(config, project_root=PROJECT_ROOT)
     _validate_v3_config(config)
 
@@ -386,6 +399,7 @@ def main() -> int:
     metadata = validate_dataset(dataset_root)
     require_minimum_source_sketches(
         metadata,
+        minimum=configured_minimum_source_sketches(config),
     )
     codebook_path = _codebook_path(config)
     manifest_path = _manifest_path(config)
@@ -437,6 +451,7 @@ def main() -> int:
             "device": str(device),
             "precision": "32-true",
             "expected_samples": args.expected_samples,
+            "minimum_source_sketches": configured_minimum_source_sketches(config),
         },
     )
     output_path = write_gate_report_atomic(_project_path(args.output), report)
