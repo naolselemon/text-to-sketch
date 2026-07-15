@@ -219,10 +219,19 @@ def save_reconstruction_pair(
     target_title = (
         "decoded target"
         if uses_source_transform
-        else "decoded target (normalized canvas)"
+        else f"decoded target | tokens={example.length}"
     )
     _plot_raster(axes_array[panel], target, target_title)
-    _plot_raster(axes_array[panel + 1], prediction, "model prediction")
+    stats = getattr(example, "statistics", {}) or {}
+    if stats:
+        pred_title = (
+            f"model prediction | tokens={example.prediction_length or 0} "
+            f"eos={stats.get('eos_position', 'n/a')} "
+            f"strokes={stats.get('generated_stroke_count', 'n/a')}"
+        )
+    else:
+        pred_title = "model prediction"
+    _plot_raster(axes_array[panel + 1], prediction, pred_title)
     fig.tight_layout()
     fig.savefig(path, bbox_inches="tight", facecolor="white")
     plt.close(fig)

@@ -1,0 +1,193 @@
+name: anime_anchored_v3_direct
+description: Anchored-V3 target-faithful reconstruction with direct encoder memory.
+
+run:
+  id: anime-anchored-v3-direct
+  output_dir: weights/finetuned/sketchformer-anchored-v3-direct
+  resume_from_checkpoint: null
+
+pretrained:
+  use_converted_sketchformer_weights: true
+  path: weights/pretrained/sketchformer_anchored_v3_transformer_init.pt
+  mode: strict
+  strict: true
+
+overrides:
+  data:
+    name: anime_anchored_v3
+    dataset:
+      root: data/processed/sketchformer-ready-data/anchored-v3/current
+      manifest_file: manifest.jsonl
+      train_source_limit: null
+      subset_seed: 42
+      source_subset_strategy: nested_hash
+      include_augmentations: true
+      minimum_source_sketches: 25000
+    format:
+      type: anchored_v3
+      version: 3
+      token_dictionary:
+        codebook_dir: null
+        codebook_path: data/processed/sketchformer-ready-data/anchored-v3/current/codebook.npy
+        codebook_size: 2048
+        motion_token_offset: 1
+        pad_token_id: 0
+        sep_token_id: null
+        x_token_offset: 2049
+        y_token_offset: 2305
+        coordinate_bins: 256
+        stroke_start_token_id: 2561
+        stroke_end_token_id: 2562
+        sos_token_id: 2563
+        eos_token_id: 2564
+        mask_token_id: 2565
+        vocab_size: 2566
+    sequence:
+      max_length: 4096
+      target_max_length: 4096
+      truncate_long_sequences: false
+      add_start_token: false
+      add_end_token: false
+    batching:
+      batch_size: 8
+      eval_batch_size: 8
+      max_tokens_per_batch: 4096
+      eval_max_tokens_per_batch: 4096
+      bucket_by_length: false
+      bucket_boundaries: [512, 1024, 2048, 4096]
+  model:
+    name: sketchformer_anchored_v3_direct
+    input:
+      type: tok_dict
+      max_seq_len: 4096
+    architecture:
+      d_model: 128
+      latent_dim: 128
+      num_encoder_layers: 4
+      num_decoder_layers: 4
+      num_heads: 8
+      dim_feedforward: 512
+      dropout: 0.1
+      activation: relu
+      norm_first: false
+      use_final_norm: false
+      layer_norm_eps: 0.000001
+      gradient_checkpointing: true
+      pooling_mode: tf_self_attn_v1
+      pool_hidden_dim: 256
+      latent_expander_mode: tf_dense
+    embedding:
+      combine_method: add
+      positional_encoding:
+        type: sinusoidal
+        max_length: 4096
+    decoder:
+      autoregressive: true
+      blind_decoder_mask: false
+      memory_source: encoder
+      tie_token_weights: true
+      generation_grammar: anchored_v3
+    heads:
+      reconstruction:
+        enabled: true
+        target: tok_dict
+      classification:
+        enabled: false
+  optimizer:
+    optimizer:
+      type: adamw
+      lr: 0.0001
+      weight_decay: 0.01
+      betas: [0.9, 0.95]
+      eps: 0.00000001
+    scheduler:
+      type: cosine_with_warmup
+      warmup_fraction: 0.05
+      warmup_cap_steps: 500
+      min_lr: 0.000001
+      interval: step
+      frequency: 1
+    gradient:
+      clip_norm: 1.0
+    loss_weights:
+      token: 1.0
+      reconstruction: 1.0
+      cumulative_point: 2.0
+      stroke_endpoint: 1.0
+      structural_token: 2.0
+      label_smoothing: 0.05
+      classification: 0.0
+  trainer:
+    runtime:
+      precision: bf16-mixed
+    training:
+      max_epochs: 34
+      log_every_n_steps: 25
+      accumulate_grad_batches: 1
+      target_tokens_per_step: 32768
+    curriculum:
+      enabled: true
+      early_stopping_patience: 5
+      stages:
+        - name: new-grammar-512
+          max_length: 512
+          epochs: 2
+          learning_rate: 0.0003
+          trainable: new_modules
+          learning_rates:
+            new_modules: 0.0003
+            decoder: 0.0001
+            encoder: 0.00001
+        - name: decoder-adaptation-1024
+          max_length: 1024
+          epochs: 4
+          learning_rate: 0.0002
+          trainable: decoder_top_encoder
+          learning_rates:
+            new_modules: 0.0002
+            decoder: 0.00005
+            encoder: 0.00001
+        - name: full-adaptation-2048
+          max_length: 2048
+          epochs: 8
+          learning_rate: 0.0001
+          trainable: all
+          learning_rates:
+            new_modules: 0.0001
+            decoder: 0.00005
+            encoder: 0.00001
+        - name: long-reconstruction-4096
+          max_length: 4096
+          epochs: 20
+          learning_rate: 0.00005
+          trainable: all
+          learning_rates:
+            new_modules: 0.00005
+            decoder: 0.00002
+            encoder: 0.000005
+    exposure:
+      enabled: true
+      decoder_mask_probability: 0.10
+      maximum_probability: 0.25
+    free_running_validation:
+      max_samples: 256
+      stratify_by_length: true
+    gates:
+      require_overfit_report: true
+      overfit_report: data/processed/evaluations/anchored_v3_overfit_gate.json
+    checkpointing:
+      monitor: val/free_running/macro_geometry_f1_2px_median
+      mode: max
+      save_last: true
+
+evaluation:
+  primary_metric: val/free_running/macro_geometry_f1_2px_median
+  decode_mode: free-running
+  generate_reconstruction_plots: true
+  release_gates:
+    geometry_f1_2px_median: 0.95
+    geometry_f1_2px_median_length_2049_4096: 0.90
+    geometry_f1_2px_p10: 0.85
+    symmetric_chamfer_px_p95: 3.0
+    premature_eos_rate: 0.02
+    max_length_hit_rate: 0.02

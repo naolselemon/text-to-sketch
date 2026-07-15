@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 import torch
@@ -18,14 +18,21 @@ def trainable_parameters(model_or_parameters: nn.Module | Iterable[nn.Parameter]
 
 
 def build_optimizer(
-    model_or_parameters: nn.Module | Iterable[nn.Parameter],
+    model_or_parameters: nn.Module | Iterable[nn.Parameter] | Sequence[dict[str, Any]],
     config: Mapping[str, Any],
 ) -> torch.optim.Optimizer:
     """Build a PyTorch optimizer from optimizer config."""
 
     optimizer_config = config.get("optimizer", config)
     optimizer_type = str(optimizer_config.get("type", "adamw")).lower()
-    params = list(trainable_parameters(model_or_parameters))
+    if (
+        isinstance(model_or_parameters, Sequence)
+        and model_or_parameters
+        and isinstance(model_or_parameters[0], dict)
+    ):
+        params: Any = list(model_or_parameters)
+    else:
+        params = list(trainable_parameters(model_or_parameters))
     if not params:
         raise ValueError("No trainable parameters were provided to the optimizer")
 

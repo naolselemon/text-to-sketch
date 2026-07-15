@@ -19,7 +19,7 @@ research_objective:
 launch:
   dry_run: "python scripts/sketchformer/train.py --experiment anime_tok_dict_finetune --dry-run"
   train: "python scripts/sketchformer/train.py --experiment anime_tok_dict_finetune"
-  evaluate: "python scripts/sketchformer/evaluate.py --experiment anime_tok_dict_finetune --checkpoint weights/finetuned/sketchformer-tok-dict-anime/last.pt"
+  evaluate: "python scripts/sketchformer/evaluate.py --experiment anime_tok_dict_finetune --checkpoint weights/finetuned/sketchformer-tok-dict-anime/last.pt --allow-legacy-checkpoint"
   export: "python scripts/sketchformer/export.py --experiment anime_tok_dict_finetune --checkpoint weights/finetuned/sketchformer-tok-dict-anime/last.pt --output weights/finetuned/sketchformer-tok-dict-anime/export.pt"
 
 expected_data:

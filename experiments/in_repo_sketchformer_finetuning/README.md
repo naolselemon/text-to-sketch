@@ -61,7 +61,8 @@ Evaluate a checkpoint:
 ```bash
 python scripts/sketchformer/evaluate.py \
   --experiment anime_tok_dict_finetune \
-  --checkpoint weights/finetuned/sketchformer-tok-dict-anime/last.pt
+  --checkpoint weights/finetuned/sketchformer-tok-dict-anime/last.pt \
+  --allow-legacy-checkpoint
 ```
 
 Export a checkpoint:

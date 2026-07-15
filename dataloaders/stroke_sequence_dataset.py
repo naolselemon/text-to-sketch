@@ -66,12 +66,12 @@ class StrokeSequenceDataset(Dataset):
             "source_index": int(entry.local_index),
             "sample_id": entry.sample_id,
         }
-        if self.format_type in {"tok_dict", "token", "tokens"}:
+        if self.format_type in {"tok_dict", "token", "tokens", "anchored_v3"}:
             sample["tokens"] = np.asarray(sequence, dtype=np.int64)
         elif self.format_type == "stroke3":
             sample["stroke3"] = np.asarray(sequence, dtype=np.float32)
         else:
-            raise ValueError("format_type must be one of: stroke3, tok_dict")
+            raise ValueError("format_type must be one of: stroke3, tok_dict, anchored_v3")
         if self.transform is not None:
             sample = self.transform(sample)
         return sample

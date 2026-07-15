@@ -23,6 +23,8 @@ class SketchformerLossOutput:
     token_accuracy: torch.Tensor | None = None
     token_perplexity: torch.Tensor | None = None
     valid_tokens: torch.Tensor | None = None
+    cumulative_point: torch.Tensor | None = None
+    stroke_endpoint: torch.Tensor | None = None
     kind: str = "continuous"
 
     def as_log_dict(self, prefix: str = "") -> dict[str, torch.Tensor]:
@@ -40,6 +42,10 @@ class SketchformerLossOutput:
                 logs[f"{name}token_perplexity"] = self.token_perplexity.detach()
             if self.valid_tokens is not None:
                 logs[f"{name}valid_tokens"] = self.valid_tokens.detach()
+            if self.cumulative_point is not None:
+                logs[f"{name}cumulative_point_loss"] = self.cumulative_point.detach()
+            if self.stroke_endpoint is not None:
+                logs[f"{name}stroke_endpoint_loss"] = self.stroke_endpoint.detach()
         else:
             logs[f"{name}pen_state_loss"] = self.pen_state.detach()
             logs[f"{name}xy_mse"] = self.xy_mse.detach()
@@ -97,12 +103,13 @@ def gaussian_mixture_nll(reconstruction: Any, target_xy: torch.Tensor) -> torch.
 class SketchformerLoss(nn.Module):
     """Mask-aware reconstruction, pen-state, and optional class loss."""
 
-    def __init__(self, weights: Any) -> None:
+    def __init__(self, weights: Any, *, anchored_objective: nn.Module | None = None) -> None:
         super().__init__()
         self.reconstruction_weight = _weight(weights, "reconstruction", 1.0)
         self.token_weight = _weight(weights, "token", self.reconstruction_weight)
         self.pen_state_weight = _weight(weights, "pen_state", 1.0)
         self.classification_weight = _weight(weights, "classification", 0.0)
+        self.anchored_objective = anchored_objective
 
     def forward(self, output: Any, batch: Mapping[str, torch.Tensor]) -> SketchformerLossOutput:
         if output.reconstruction is None:
@@ -171,12 +178,21 @@ class SketchformerLoss(nn.Module):
                 f"{token_logits.shape[:2]} != {token_targets.shape}"
             )
 
-        loss = F.cross_entropy(
-            token_logits.reshape(-1, token_logits.shape[-1]),
-            token_targets.reshape(-1),
-            reduction="none",
-        ).view_as(token_targets)
-        token_loss = masked_mean(loss, token_mask)
+        cumulative_point = None
+        stroke_endpoint = None
+        if self.anchored_objective is not None:
+            token_loss, cumulative_point, stroke_endpoint = self.anchored_objective(
+                token_logits,
+                token_targets,
+                token_mask,
+            )
+        else:
+            loss = F.cross_entropy(
+                token_logits.reshape(-1, token_logits.shape[-1]),
+                token_targets.reshape(-1),
+                reduction="none",
+            ).view_as(token_targets)
+            token_loss = masked_mean(loss, token_mask)
         token_predictions = torch.argmax(token_logits, dim=-1)
         token_accuracy = masked_mean(
             (token_predictions == token_targets).to(dtype=torch.float32),
@@ -190,6 +206,14 @@ class SketchformerLoss(nn.Module):
             self.token_weight * token_loss
             + self.classification_weight * classification_loss
         )
+        if cumulative_point is not None and stroke_endpoint is not None:
+            total = (
+                total
+                + float(getattr(self.anchored_objective.config, "point_weight"))
+                * cumulative_point
+                + float(getattr(self.anchored_objective.config, "endpoint_weight"))
+                * stroke_endpoint
+            )
         return SketchformerLossOutput(
             total=total,
             reconstruction=token_loss,
@@ -199,6 +223,8 @@ class SketchformerLoss(nn.Module):
             token_accuracy=token_accuracy,
             token_perplexity=token_perplexity,
             valid_tokens=token_mask.sum().to(dtype=torch.float32),
+            cumulative_point=cumulative_point,
+            stroke_endpoint=stroke_endpoint,
             kind="tok_dict",
         )
 

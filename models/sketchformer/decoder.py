@@ -102,7 +102,15 @@ class DecoderBlock(nn.Module):
     def __init__(self, config: SketchformerConfig) -> None:
         super().__init__()
         self.norm_first = config.norm_first
-        memory_dim = config.pool_output_dim if config.latent_expander_mode == "tf_dense" else config.d_model
+        memory_dim = (
+            config.d_model
+            if config.decoder_memory_source == "encoder"
+            else (
+                config.pool_output_dim
+                if config.latent_expander_mode == "tf_dense"
+                else config.d_model
+            )
+        )
         self.self_attn = SDPAAttention(config.d_model, config.num_heads, config.dropout)
         self.cross_attn = SDPAAttention(
             config.d_model,
@@ -167,6 +175,7 @@ class DecoderBlock(nn.Module):
         x: torch.Tensor,
         memory: torch.Tensor,
         cache: DecoderLayerCache | None = None,
+        cross_attention_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, DecoderLayerCache]:
         """Decode new positions using cached self and cross-attention states."""
 
@@ -187,6 +196,7 @@ class DecoderBlock(nn.Module):
                 memory,
                 cache=cache.cross_key_value,
                 static_key_value=True,
+                attention_mask=cross_attention_mask,
             )
             x = x + self.dropout2(cross_output)
             x = x + self.dropout3(self.ffn(self.norm3(x)))
@@ -204,6 +214,7 @@ class DecoderBlock(nn.Module):
                 memory,
                 cache=cache.cross_key_value,
                 static_key_value=True,
+                attention_mask=cross_attention_mask,
             )
             x = self.norm2(x + self.dropout2(cross_output))
             x = self.norm3(x + self.dropout3(self.ffn(x)))
@@ -259,6 +270,7 @@ class StrokeDecoder(nn.Module):
         x: torch.Tensor,
         memory: torch.Tensor,
         caches: list[DecoderLayerCache] | None = None,
+        cross_attention_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, list[DecoderLayerCache]]:
         """Decode incremental positions with one cache per decoder layer."""
 
@@ -268,6 +280,11 @@ class StrokeDecoder(nn.Module):
             raise ValueError("Decoder cache count does not match decoder layer count")
         updated: list[DecoderLayerCache] = []
         for layer, cache in zip(self.layers, caches):
-            x, layer_cache = layer.forward_step(x, memory, cache)
+            x, layer_cache = layer.forward_step(
+                x,
+                memory,
+                cache,
+                cross_attention_mask,
+            )
             updated.append(layer_cache)
         return self.final_norm(x), updated

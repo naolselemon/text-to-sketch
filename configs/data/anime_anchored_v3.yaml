@@ -1,0 +1,66 @@
+name: anime_anchored_v3
+
+dataset:
+  root: data/processed/sketchformer-ready-data/anchored-v3/current
+  train_source_limit: null
+  subset_seed: 42
+  source_subset_strategy: nested_hash
+  include_augmentations: true
+  minimum_source_sketches: 25000
+  train_pattern: train_*.npz
+  valid_file: valid.npz
+  test_file: test.npz
+  metadata_file: meta.npz
+  manifest_file: manifest.jsonl
+
+format:
+  type: anchored_v3
+  version: 3
+  token_dictionary:
+    codebook_dir: null
+    codebook_path: data/processed/sketchformer-ready-data/anchored-v3/current/codebook.npy
+    codebook_size: 2048
+    motion_token_offset: 1
+    pad_token_id: 0
+    sep_token_id: null
+    x_token_offset: 2049
+    y_token_offset: 2305
+    coordinate_bins: 256
+    stroke_start_token_id: 2561
+    stroke_end_token_id: 2562
+    sos_token_id: 2563
+    eos_token_id: 2564
+    mask_token_id: 2565
+    vocab_size: 2566
+
+sequence:
+  max_length: 4096
+  target_max_length: 4096
+  pad_value: 0
+  pad_to_multiple_of: 8
+  truncate_long_sequences: false
+  add_start_token: false
+  add_end_token: false
+  build_attention_mask: true
+
+batching:
+  batch_size: 8
+  eval_batch_size: 8
+  max_tokens_per_batch: 4096
+  eval_max_tokens_per_batch: 4096
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  drop_last: false
+  bucket_by_length: false
+  bucket_boundaries: [512, 1024, 2048, 4096]
+
+preprocessing:
+  max_cached_files: 2
+
+augmentation:
+  enabled: false
+
+validation:
+  min_visualization_samples: 8
+  reconstruction_samples: 8

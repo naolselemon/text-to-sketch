@@ -43,7 +43,12 @@ def compose_training_config(
             raise ValueError(f"Unsupported defaults entry: {entry}")
         for group, name in entry.items():
             selected = experiment if group == "experiment" and experiment else name
-            composed[group] = load_yaml(config_dir / group / f"{selected}.yaml")
+            selected_config = load_yaml(config_dir / group / f"{selected}.yaml")
+            if group == "experiment" and "inherits" in selected_config:
+                parent_name = str(selected_config.pop("inherits"))
+                parent_config = load_yaml(config_dir / group / f"{parent_name}.yaml")
+                selected_config = deep_merge(parent_config, selected_config)
+            composed[group] = selected_config
 
     root_without_defaults = {
         key: value for key, value in root_config.items() if key != "defaults"
@@ -58,6 +63,73 @@ def compose_training_config(
     return composed
 
 
+def pin_anchored_v3_artifacts(
+    config: dict[str, Any],
+    *,
+    project_root: Path,
+) -> Path | None:
+    """Resolve ``current`` once so a running job cannot switch V3 artifacts."""
+
+    if str(get_nested(config, "data.format.type")) != "anchored_v3":
+        return None
+    root_value = get_nested(config, "data.dataset.root")
+    if not root_value:
+        raise ValueError("Anchored V3 requires data.dataset.root")
+    requested_root = resolve_path(project_root, root_value)
+    resolved_root = requested_root.resolve(strict=True)
+    if not resolved_root.is_dir():
+        raise NotADirectoryError(f"Anchored V3 root is not a directory: {resolved_root}")
+
+    artifact_manifest = resolved_root / "manifest.jsonl"
+    required = (artifact_manifest, resolved_root / "codebook.npy")
+    missing = [str(path) for path in required if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(
+            "Anchored V3 artifact is incomplete: " + ", ".join(missing)
+        )
+
+    dataset_config = config["data"]["dataset"]
+    configured_manifest = dataset_config.get("manifest_path")
+    if configured_manifest:
+        resolved_manifest = resolve_path(project_root, configured_manifest).resolve(
+            strict=True
+        )
+        if resolved_manifest != artifact_manifest:
+            raise ValueError(
+                "Anchored V3 data.dataset.manifest_path must resolve to the "
+                f"pinned dataset manifest {artifact_manifest}, got {resolved_manifest}"
+            )
+
+    configured_manifest_file = Path(
+        str(dataset_config.get("manifest_file", "manifest.jsonl"))
+    )
+    manifest_from_root = (
+        configured_manifest_file
+        if configured_manifest_file.is_absolute()
+        else resolved_root / configured_manifest_file
+    ).resolve(strict=True)
+    if manifest_from_root != artifact_manifest:
+        raise ValueError(
+            "Anchored V3 data.dataset.manifest_file must identify the pinned "
+            f"dataset manifest {artifact_manifest}, got {manifest_from_root}"
+        )
+
+    try:
+        pinned_root: Path = resolved_root.relative_to(project_root.resolve())
+    except ValueError:
+        pinned_root = resolved_root
+    dataset_config["root"] = str(pinned_root)
+    dataset_config["manifest_file"] = "manifest.jsonl"
+    dataset_config["manifest_path"] = str(pinned_root / "manifest.jsonl")
+    config["data"]["format"]["token_dictionary"]["codebook_path"] = str(
+        pinned_root / "codebook.npy"
+    )
+    model_tokens = get_nested(config, "model.input.token_dictionary")
+    if isinstance(model_tokens, dict):
+        model_tokens["codebook_path"] = str(pinned_root / "codebook.npy")
+    return resolved_root
+
+
 def _sync_token_dictionary_config(config: dict[str, Any]) -> None:
     """Keep tok-dict data/model vocabulary IDs from drifting apart."""
 
@@ -65,6 +137,7 @@ def _sync_token_dictionary_config(config: dict[str, Any]) -> None:
         "tok_dict",
         "token",
         "tokens",
+        "anchored_v3",
     }:
         return
 

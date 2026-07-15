@@ -29,6 +29,13 @@ tts-compare-rdp = "metrics.preprocessing.compare_rdp_epsilon:main"
 tts-evaluate-encoder = "metrics.preprocessing.evaluate_encoder:main"
 tts-evaluate-ordering = "metrics.preprocessing.evaluate_ordering:main"
 tts-evaluate-centerline-preprocessing = "metrics.preprocessing.evaluate_centerline_preprocessing:main"
+tts-evaluate-faithful-v2 = "metrics.preprocessing.evaluate_faithful_v2:main"
+tts-prepare-sketchformer-v3 = "services.anchored_sketch_data.cli:main"
+tts-initialize-sketchformer-v3 = "scripts.sketchformer.initialize_v3:main"
+tts-check-sketchformer-v3-overfit = "scripts.sketchformer.overfit_gate:main"
+tts-check-sketchformer-v3-human-review = "scripts.sketchformer.human_review:main"
+tts-build-sketchformer-v3-scaling-curve = "scripts.sketchformer.scaling_curve:main"
+
 
 [tool.setuptools.packages.find]
 include = [
@@ -48,5 +55,7 @@ include = [
   "prep_data.*",
   "scripts",
   "scripts.*",
+  "services",
+  "services.*",
   "utils",
 ]

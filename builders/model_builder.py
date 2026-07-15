@@ -13,7 +13,12 @@ def build_model(config: Mapping[str, Any]) -> nn.Module:
     """Build a model from the model config mapping."""
 
     name = str(config.get("name", "sketchformer_tok_dict"))
-    if name not in {"sketchformer_tok_dict", "sketchformer_continuous"}:
+    if name not in {
+        "sketchformer_tok_dict",
+        "sketchformer_continuous",
+        "sketchformer_anchored_v3_direct",
+        "sketchformer_anchored_v3_wide",
+    }:
         raise ValueError(f"Unsupported model config name: {name}")
 
     try:

@@ -94,6 +94,7 @@ class TokenSequenceCollator:
     eos_token_id: int | None = None
     add_start_token: bool = True
     add_end_token: bool = True
+    truncate_long_sequences: bool = True
     pad_to_multiple_of: int | None = 8
     causal_attention: bool = False
     build_attention_mask: bool = True
@@ -178,6 +179,10 @@ class TokenSequenceCollator:
 
         raw_length = int(len(sequence))
         if self.max_length is not None and raw_length > self.max_length:
+            if not self.truncate_long_sequences:
+                raise ValueError(
+                    f"Sequence length {raw_length} exceeds max_length={self.max_length}"
+                )
             sequence = np.array(sequence[: self.max_length], copy=True, dtype=np.int64)
             if self.add_end_token and self.eos_token_id is not None:
                 if len(sequence) > 1 and self.sep_token_id is not None:
