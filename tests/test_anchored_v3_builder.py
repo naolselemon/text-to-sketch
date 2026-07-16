@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import io
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import ANY, MagicMock, patch
 
 import cv2
 import numpy as np
 
 from services.anchored_sketch_data.artifacts import validate_dataset
 from services.anchored_sketch_data.builder import BuilderConfig, build_dataset
+from services.anchored_sketch_data.builder import _preprocess_sources
 from services.anchored_sketch_data.cli import parse_args
 
 
@@ -42,7 +45,7 @@ class AnchoredV3BuilderTest(unittest.TestCase):
             ), patch(
                 "services.anchored_sketch_data.builder.fit_training_codebook",
                 return_value=builder_test_codebook(),
-            ) as fit_codebook:
+            ) as fit_codebook, redirect_stderr(io.StringIO()) as progress_output:
                 dataset = build_dataset(
                     source,
                     output,
@@ -52,6 +55,7 @@ class AnchoredV3BuilderTest(unittest.TestCase):
                         train_augmentation_copies=0,
                         minimum_accepted_source_sketches=1,
                         shard_size=1,
+                        show_progress=True,
                     ),
                 )
 
@@ -66,6 +70,12 @@ class AnchoredV3BuilderTest(unittest.TestCase):
                 metadata["preparation"]["epsilon_sweep"][0]["p99_token_length"],
                 7.0,
             )
+            progress = progress_output.getvalue()
+            self.assertIn("discovered 1 images; preprocessing with 1 worker", progress)
+            self.assertIn("preprocessing complete", progress)
+            self.assertIn("images/s", progress)
+            self.assertIn("epsilon 0.5 passed", progress)
+            self.assertIn("build complete", progress)
 
     def test_minimum_source_count_is_configurable_and_prevents_publication(self) -> None:
         default_args = parse_args(
@@ -108,6 +118,7 @@ class AnchoredV3BuilderTest(unittest.TestCase):
                         calibration_size=1,
                         train_augmentation_copies=0,
                         minimum_accepted_source_sketches=2,
+                        show_progress=False,
                     ),
                 )
 
@@ -140,8 +151,106 @@ class AnchoredV3BuilderTest(unittest.TestCase):
                         train_augmentation_copies=0,
                         minimum_accepted_source_sketches=1,
                         shard_size=1,
+                        show_progress=False,
                     ),
                 )
+
+    def test_worker_cli_controls_are_explicit(self) -> None:
+        defaults = parse_args(
+            ["build", "--source-dir", "source", "--output-root", "output"]
+        )
+        tuned = parse_args(
+            [
+                "build",
+                "--source-dir",
+                "source",
+                "--output-root",
+                "output",
+                "--workers",
+                "8",
+                "--no-progress",
+            ]
+        )
+
+        self.assertEqual(defaults.workers, 0)
+        self.assertTrue(defaults.show_progress)
+        self.assertEqual(tuned.workers, 8)
+        self.assertFalse(tuned.show_progress)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp)
+            image = np.full((32, 32), 255, dtype=np.uint8)
+            cv2.line(image, (4, 16), (27, 16), 0, thickness=1)
+            cv2.imwrite(str(source / "sample.png"), image)
+            with self.assertRaisesRegex(
+                ValueError, "preprocessing_workers must be a non-negative integer"
+            ):
+                build_dataset(
+                    source,
+                    source / "output",
+                    config=BuilderConfig(
+                        preprocessing_workers=-1,
+                        show_progress=False,
+                    ),
+                )
+
+    def test_parallel_preprocessing_matches_serial_and_preserves_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp)
+            paths: list[Path] = []
+            for index in (3, 1, 2, 0):
+                image = np.full((96, 96), 255, dtype=np.uint8)
+                cv2.line(
+                    image,
+                    (8, 15 + index * 12),
+                    (87, 15 + index * 12),
+                    0,
+                    thickness=1,
+                )
+                path = source / f"sample-{index}.png"
+                cv2.imwrite(str(path), image)
+                paths.append(path)
+
+            raw_stroke = [[(x, 32) for x in range(10, 81)]]
+            pool = MagicMock()
+            pool.__enter__.return_value = pool
+            pool.imap_unordered.side_effect = lambda function, tasks, chunksize: iter(
+                reversed([function(task) for task in tasks])
+            )
+            context = MagicMock()
+            context.Pool.return_value = pool
+            with patch(
+                "services.anchored_sketch_data.builder.vectorize_image",
+                return_value=raw_stroke,
+            ), patch(
+                "services.anchored_sketch_data.builder._multiprocessing_context",
+                return_value=context,
+            ):
+                serial = _preprocess_sources(
+                    paths,
+                    source_root=source,
+                    threshold_profile="hysteresis",
+                    workers=1,
+                    show_progress=False,
+                )
+                parallel = _preprocess_sources(
+                    paths,
+                    source_root=source,
+                    threshold_profile="hysteresis",
+                    workers=2,
+                    show_progress=False,
+                )
+
+        self.assertEqual(serial, parallel)
+        context.Pool.assert_called_once_with(
+            processes=2,
+            initializer=ANY,
+        )
+        pool.imap_unordered.assert_called_once()
+        self.assertEqual(
+            [sample.sample_id for sample in parallel[0]],
+            [f"sample-{index}.png" for index in range(4)],
+        )
 
 
 if __name__ == "__main__":

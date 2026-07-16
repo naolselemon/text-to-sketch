@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-import hashlib
+import multiprocessing
+import os
+import sys
+import time
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Iterable, Sequence, TypeVar
 
 import cv2
 import numpy as np
+from tqdm.auto import tqdm
 
 from pipeline.vectorization import centerline_metrics, source_centerline, vectorize_image
 
@@ -32,6 +36,7 @@ from .tokenizer import AnchoredTokenizer
 
 
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
+_ProgressItem = TypeVar("_ProgressItem")
 
 
 @dataclass(frozen=True)
@@ -47,6 +52,8 @@ class BuilderConfig:
     source_vector_f1_gate: float = 0.98
     roundtrip_median_f1_gate: float = 0.99
     roundtrip_p10_f1_gate: float = 0.97
+    preprocessing_workers: int = 0
+    show_progress: bool = True
 
 
 @dataclass(frozen=True)
@@ -60,6 +67,13 @@ class _SourceGeometry:
     canvas_transform: CanvasTransform
     group_id: str = ""
     split: str = ""
+
+
+@dataclass(frozen=True)
+class _PreprocessingTask:
+    path: str
+    sample_id: str
+    threshold_profile: str
 
 
 @dataclass(frozen=True)
@@ -81,6 +95,7 @@ def build_dataset(
 ) -> Path:
     """Prepare raw line-art images and publish a validated V3 dataset."""
 
+    build_started = time.perf_counter()
     source_root = Path(source_dir)
     paths = sorted(
         path
@@ -91,47 +106,27 @@ def build_dataset(
         raise FileNotFoundError(f"No sketch images found in {source_root}")
     _validate_config(config)
 
-    sources: list[_SourceGeometry] = []
-    rejected: list[RejectedSample] = []
-    for path in paths:
-        sample_id = path.relative_to(source_root).as_posix()
-        source_digest = sha256_file(path)
-        try:
-            image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
-            if image is None:
-                raise ValueError("image could not be decoded")
-            raw = vectorize_image(
-                path,
-                epsilon=0.0,
-                method="centerline",
-                threshold_profile=config.vectorizer_threshold_profile,
-                min_object_size=1,
-            )
-            cleaned = preprocess_strokes(raw, source_shape=image.shape)
-            normalized, canvas_transform = normalize_to_canvas_with_transform(cleaned)
-            if not normalized:
-                raise ValueError("no drawable strokes remained after cleaning")
-            sources.append(
-                _SourceGeometry(
-                    sample_id=sample_id,
-                    source_path=str(path),
-                    source_sha256=source_digest,
-                    perceptual_hash=perceptual_hash(image),
-                    strokes=normalized,
-                    point_count=sum(len(stroke) for stroke in normalized),
-                    canvas_transform=canvas_transform,
-                )
-            )
-        except Exception as exc:
-            rejected.append(
-                RejectedSample(
-                    sample_id=sample_id,
-                    source_path=str(path),
-                    source_sha256=source_digest,
-                    perceptual_hash=None,
-                    rejection_reason=f"preprocessing_error:{type(exc).__name__}:{exc}",
-                )
-            )
+    worker_count = _resolve_worker_count(config.preprocessing_workers, len(paths))
+    _log(
+        f"discovered {len(paths):,} images; preprocessing with "
+        f"{worker_count} worker{'s' if worker_count != 1 else ''}",
+        enabled=config.show_progress,
+    )
+    preprocessing_started = time.perf_counter()
+    sources, rejected = _preprocess_sources(
+        paths,
+        source_root=source_root,
+        threshold_profile=config.vectorizer_threshold_profile,
+        workers=worker_count,
+        show_progress=config.show_progress,
+    )
+    _log_rate(
+        "preprocessing complete",
+        completed=len(paths),
+        started_at=preprocessing_started,
+        detail=f"{len(sources):,} accepted, {len(rejected):,} rejected",
+        enabled=config.show_progress,
+    )
     if not sources:
         raise ValueError("No source sketches survived preprocessing")
     _enforce_minimum_source_count(
@@ -164,27 +159,61 @@ def build_dataset(
     if not training:
         raise ValueError("Group split produced no training samples")
     calibration = _stratified_calibration(training, config.calibration_size)
+    split_counts = {
+        split: sum(sample.split == split for sample in sources)
+        for split in ("train", "valid", "test")
+    }
+    _log(
+        "group split complete: "
+        + ", ".join(f"{split}={count:,}" for split, count in split_counts.items())
+        + f"; calibration={len(calibration):,}",
+        enabled=config.show_progress,
+    )
 
     sweep: list[EpsilonResult] = []
     chosen_epsilon: float | None = None
     chosen_codebook: np.ndarray | None = None
-    for epsilon in sorted(set(config.epsilon_candidates)):
+    epsilon_candidates = sorted(set(config.epsilon_candidates))
+    for epsilon_index, epsilon in enumerate(epsilon_candidates, start=1):
+        epsilon_started = time.perf_counter()
+        _log(
+            f"calibrating RDP epsilon {epsilon:g} "
+            f"({epsilon_index}/{len(epsilon_candidates)}): simplifying strokes",
+            enabled=config.show_progress,
+        )
         try:
             simplified = {
                 sample.sample_id: simplify_strokes(sample.strokes, epsilon)
-                for sample in sources
+                for sample in _progress(
+                    sources,
+                    total=len(sources),
+                    description=f"RDP epsilon {epsilon:g}",
+                    unit="image",
+                    enabled=config.show_progress,
+                )
             }
             codebook_inputs = _training_codebook_samples(
                 training,
                 simplified,
                 config=config,
             )
+            _log(
+                f"epsilon {epsilon:g}: fitting the 2,048-center codebook from "
+                f"{len(codebook_inputs):,} training variants",
+                enabled=config.show_progress,
+            )
             codebook = fit_training_codebook(codebook_inputs, seed=config.seed)
             tokenizer = AnchoredTokenizer(codebook)
             source_scores: list[float] = []
             roundtrip_scores: list[float] = []
             lengths: list[int] = []
-            for sample in calibration:
+            for sample in _progress(
+                calibration,
+                total=len(calibration),
+                description=f"Calibration epsilon {epsilon:g}",
+                unit="image",
+                enabled=config.show_progress,
+            ):
                 candidate = simplified[sample.sample_id]
                 tokens = tokenizer.encode(candidate)
                 restored = tokenizer.decode(tokens)
@@ -213,6 +242,15 @@ def build_dataset(
             )
             result = EpsilonResult(**{**asdict(result), "passed": passed})
             sweep.append(result)
+            _log(
+                f"epsilon {epsilon:g} {'passed' if passed else 'failed'} in "
+                f"{_format_duration(time.perf_counter() - epsilon_started)}: "
+                f"p99_tokens={result.p99_token_length:g}, "
+                f"source_f1={result.source_vector_median_f1:.4f}, "
+                f"roundtrip_median_f1={result.roundtrip_median_f1:.4f}, "
+                f"roundtrip_p10_f1={result.roundtrip_p10_f1:.4f}",
+                enabled=config.show_progress,
+            )
             if passed:
                 chosen_epsilon = float(epsilon)
                 chosen_codebook = codebook
@@ -229,6 +267,12 @@ def build_dataset(
                     failure=f"{type(exc).__name__}:{exc}",
                 )
             )
+            _log(
+                f"epsilon {epsilon:g} errored after "
+                f"{_format_duration(time.perf_counter() - epsilon_started)}: "
+                f"{type(exc).__name__}: {exc}",
+                enabled=config.show_progress,
+            )
     if chosen_epsilon is None or chosen_codebook is None:
         details = "; ".join(
             f"epsilon={result.epsilon}: {result.failure or asdict(result)}" for result in sweep
@@ -237,7 +281,19 @@ def build_dataset(
 
     tokenizer = AnchoredTokenizer(chosen_codebook)
     accepted: list[EncodedSample] = []
-    for sample in sources:
+    encoding_started = time.perf_counter()
+    _log(
+        f"encoding {len(sources):,} accepted source images at epsilon "
+        f"{chosen_epsilon:g}",
+        enabled=config.show_progress,
+    )
+    for sample in _progress(
+        sources,
+        total=len(sources),
+        description="Encoding",
+        unit="image",
+        enabled=config.show_progress,
+    ):
         simplified = simplify_strokes(sample.strokes, chosen_epsilon)
         variants: list[tuple[str, list[list[tuple[float, float]]], bool]] = [
             (sample.sample_id, simplified, False)
@@ -297,6 +353,13 @@ def build_dataset(
                     preprocessing=preprocessing,
                 )
             )
+    _log_rate(
+        "encoding complete",
+        completed=len(sources),
+        started_at=encoding_started,
+        detail=f"{len(accepted):,} variants accepted, {len(rejected):,} total rejected",
+        enabled=config.show_progress,
+    )
     if not accepted:
         raise ValueError("All encoded samples exceeded the maximum sequence length")
     accepted_source_count = sum(
@@ -347,7 +410,12 @@ def build_dataset(
             "point_count_buckets": [512, 1024, 2048, "inf"],
         },
     }
-    return write_dataset_atomic(
+    _log(
+        f"publishing {len(accepted):,} encoded samples in shards of "
+        f"{config.shard_size:,}",
+        enabled=config.show_progress,
+    )
+    destination = write_dataset_atomic(
         output_root,
         accepted,
         chosen_codebook,
@@ -355,6 +423,189 @@ def build_dataset(
         rejected=rejected,
         shard_size=config.shard_size,
     )
+    _log(
+        f"build complete in {_format_duration(time.perf_counter() - build_started)}: "
+        f"{destination}",
+        enabled=config.show_progress,
+    )
+    return destination
+
+
+def _preprocess_sources(
+    paths: Sequence[Path],
+    *,
+    source_root: Path,
+    threshold_profile: str,
+    workers: int,
+    show_progress: bool,
+) -> tuple[list[_SourceGeometry], list[RejectedSample]]:
+    """Vectorize independent source images in worker processes."""
+
+    tasks = [
+        _PreprocessingTask(
+            path=str(path),
+            sample_id=path.relative_to(source_root).as_posix(),
+            threshold_profile=threshold_profile,
+        )
+        for path in paths
+    ]
+    if workers == 1:
+        results = _progress(
+            map(_preprocess_source, tasks),
+            total=len(tasks),
+            description="Preprocessing",
+            unit="image",
+            enabled=show_progress,
+        )
+        materialized = list(results)
+    else:
+        chunksize = min(16, max(1, len(tasks) // (workers * 8)))
+        context = _multiprocessing_context()
+        with context.Pool(
+            processes=workers,
+            initializer=_initialize_preprocessing_worker,
+        ) as pool:
+            results = _progress(
+                pool.imap_unordered(
+                    _preprocess_source,
+                    tasks,
+                    chunksize=chunksize,
+                ),
+                total=len(tasks),
+                description="Preprocessing",
+                unit="image",
+                enabled=show_progress,
+            )
+            materialized = list(results)
+
+    sources = sorted(
+        (result for result in materialized if isinstance(result, _SourceGeometry)),
+        key=lambda sample: sample.sample_id,
+    )
+    rejected = sorted(
+        (result for result in materialized if isinstance(result, RejectedSample)),
+        key=lambda sample: sample.sample_id,
+    )
+    return sources, rejected
+
+
+def _preprocess_source(task: _PreprocessingTask) -> _SourceGeometry | RejectedSample:
+    path = Path(task.path)
+    source_digest = sha256_file(path)
+    try:
+        image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+        if image is None:
+            raise ValueError("image could not be decoded")
+        raw = vectorize_image(
+            path,
+            epsilon=0.0,
+            method="centerline",
+            threshold_profile=task.threshold_profile,
+            min_object_size=1,
+        )
+        cleaned = preprocess_strokes(raw, source_shape=image.shape)
+        normalized, canvas_transform = normalize_to_canvas_with_transform(cleaned)
+        if not normalized:
+            raise ValueError("no drawable strokes remained after cleaning")
+        return _SourceGeometry(
+            sample_id=task.sample_id,
+            source_path=str(path),
+            source_sha256=source_digest,
+            perceptual_hash=perceptual_hash(image),
+            strokes=normalized,
+            point_count=sum(len(stroke) for stroke in normalized),
+            canvas_transform=canvas_transform,
+        )
+    except Exception as exc:
+        return RejectedSample(
+            sample_id=task.sample_id,
+            source_path=str(path),
+            source_sha256=source_digest,
+            perceptual_hash=None,
+            rejection_reason=f"preprocessing_error:{type(exc).__name__}:{exc}",
+        )
+
+
+def _initialize_preprocessing_worker() -> None:
+    """Prevent nested OpenCV pools from oversubscribing each process."""
+
+    cv2.setNumThreads(1)
+    if hasattr(cv2, "ocl"):
+        cv2.ocl.setUseOpenCL(False)
+
+
+def _multiprocessing_context() -> multiprocessing.context.BaseContext:
+    """Avoid forking native OpenCV/NumPy threads into preprocessing workers."""
+
+    if "forkserver" in multiprocessing.get_all_start_methods():
+        return multiprocessing.get_context("forkserver")
+    return multiprocessing.get_context("spawn")
+
+
+def _resolve_worker_count(requested: int, image_count: int) -> int:
+    if image_count <= 0:
+        raise ValueError("image_count must be positive")
+    if requested < 0:
+        raise ValueError("preprocessing_workers must be non-negative")
+    if requested == 0:
+        try:
+            available = len(os.sched_getaffinity(0))
+        except AttributeError:
+            available = os.cpu_count() or 1
+    else:
+        available = requested
+    return max(1, min(int(available), int(image_count)))
+
+
+def _progress(
+    values: Iterable[_ProgressItem],
+    *,
+    total: int,
+    description: str,
+    unit: str,
+    enabled: bool,
+) -> Iterable[_ProgressItem]:
+    return tqdm(
+        values,
+        total=total,
+        desc=description,
+        unit=unit,
+        disable=not enabled,
+        dynamic_ncols=True,
+        mininterval=0.25,
+    )
+
+
+def _log(message: str, *, enabled: bool) -> None:
+    if enabled:
+        print(f"[anchored-v3] {message}", file=sys.stderr, flush=True)
+
+
+def _log_rate(
+    label: str,
+    *,
+    completed: int,
+    started_at: float,
+    detail: str,
+    enabled: bool,
+) -> None:
+    elapsed = max(time.perf_counter() - started_at, 1e-9)
+    _log(
+        f"{label} in {_format_duration(elapsed)} "
+        f"({completed / elapsed:,.2f} images/s): {detail}",
+        enabled=enabled,
+    )
+
+
+def _format_duration(seconds: float) -> str:
+    total_seconds = max(0, int(round(seconds)))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, remaining_seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours:d}h {minutes:02d}m {remaining_seconds:02d}s"
+    if minutes:
+        return f"{minutes:d}m {remaining_seconds:02d}s"
+    return f"{remaining_seconds:d}s"
 
 
 def _training_codebook_samples(
@@ -405,6 +656,14 @@ def _validate_config(config: BuilderConfig) -> None:
         raise ValueError("minimum_accepted_source_sketches must be positive")
     if config.shard_size <= 0:
         raise ValueError("shard_size must be positive")
+    if (
+        isinstance(config.preprocessing_workers, bool)
+        or not isinstance(config.preprocessing_workers, int)
+        or config.preprocessing_workers < 0
+    ):
+        raise ValueError("preprocessing_workers must be a non-negative integer")
+    if not isinstance(config.show_progress, bool):
+        raise ValueError("show_progress must be a boolean")
 
 
 def _source_vector_geometry_f1(

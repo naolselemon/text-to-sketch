@@ -58,6 +58,17 @@ Run the deterministic anchored V3 contract eval:
 python -B evals/anchored_v3_reconstruction_eval.py
 ```
 
+Measure anchored V3 serial/parallel preprocessing equivalence and throughput:
+
+```bash
+python -B evals/anchored_v3_parallel_preprocessing_eval.py \
+  --images 256 --workers 0 --minimum-speedup 1.25
+```
+
+The throughput threshold is a server eval, not a commit gate, because shared CI
+CPU load can change wall-clock speed. Deterministic serial/parallel output
+equivalence remains covered by the local gate tests.
+
 The `-B` flag avoids writing `__pycache__` files into the repository.
 
 Anchored V3 gate tests cover grammar and round trips, deterministic cleaning,

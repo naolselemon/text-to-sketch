@@ -414,8 +414,18 @@ tts-prepare-sketchformer-v3 build \
   --calibration-size 256 \
   --augmentation-copies 1 \
   --minimum-accepted-source-sketches 1 \
-  --shard-size 1024
+  --shard-size 1024 \
+  --workers 0
 ```
+
+`--workers 0` automatically uses every CPU available to the process for the
+independent image vectorization and cleaning loop. Set an explicit value such
+as `--workers 12` to leave CPU capacity for other jobs. Each worker disables
+OpenCV's nested thread pool, so worker processes do not multiply into hundreds
+of competing threads. The command reports per-stage elapsed time, image rate,
+accepted/rejected counts, epsilon calibration metrics, and tqdm progress bars.
+Use `--no-progress` only for quiet automation. This preprocessing stage is CPU
+bound; the RTX 3090 is used later during model training, not during this build.
 
 The command publishes an immutable directory named
 `anchored_v3-<content-hash>` and atomically updates the relative `current`

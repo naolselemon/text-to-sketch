@@ -31,6 +31,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     build.add_argument("--shard-size", type=int, default=1024)
+    build.add_argument(
+        "--workers",
+        type=int,
+        default=0,
+        help=(
+            "Image preprocessing processes. 0 uses all CPUs available to this "
+            "process (default: 0)."
+        ),
+    )
+    build.add_argument(
+        "--no-progress",
+        action="store_false",
+        dest="show_progress",
+        help="Disable stage logs and tqdm progress bars.",
+    )
     validate = subparsers.add_parser("validate", help="Validate an existing dataset")
     validate.add_argument("dataset_dir", type=Path)
     args = parser.parse_args(argv)
@@ -57,6 +72,8 @@ def main(argv: list[str] | None = None) -> int:
             train_augmentation_copies=args.augmentation_copies,
             minimum_accepted_source_sketches=args.minimum_accepted_source_sketches,
             shard_size=args.shard_size,
+            preprocessing_workers=args.workers,
+            show_progress=args.show_progress,
         ),
     )
     print(f"Published anchored V3 dataset to {destination}")
