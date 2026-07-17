@@ -381,7 +381,16 @@ class _EndpointIndex:
 
 
 def deterministic_order(strokes: Sequence[Sequence[Sequence[float]]]) -> list[Stroke]:
-    oriented = [_canonical_orientation(stroke) for stroke in strokes if len(stroke) >= 2]
+    oriented: list[Stroke] = []
+    for stroke in strokes:
+        if len(stroke) < 2:
+            continue
+        candidate = _canonical_orientation(stroke)
+        # Canonicalization removes consecutive duplicate coordinates. RDP can
+        # reduce a tiny closed loop to two identical endpoints, which therefore
+        # becomes a singleton here and is not drawable by the V3 grammar.
+        if len(candidate) >= 2:
+            oriented.append(candidate)
 
     def key(stroke: Stroke) -> tuple[object, ...]:
         points = np.asarray(stroke, dtype=np.float64)

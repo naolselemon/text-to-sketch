@@ -257,23 +257,18 @@ def build_dataset(
                 chosen_codebook = codebook
                 break
         except Exception as exc:
-            sweep.append(
-                EpsilonResult(
-                    epsilon=float(epsilon),
-                    p99_token_length=-1.0,
-                    source_vector_median_f1=0.0,
-                    roundtrip_median_f1=0.0,
-                    roundtrip_p10_f1=0.0,
-                    passed=False,
-                    failure=f"{type(exc).__name__}:{exc}",
-                )
-            )
             _log(
-                f"epsilon {epsilon:g} errored after "
+                f"epsilon {epsilon:g} failed unexpectedly after "
                 f"{_format_duration(time.perf_counter() - epsilon_started)}: "
-                f"{type(exc).__name__}: {exc}",
+                f"{type(exc).__name__}: {exc}; aborting without trying the "
+                "remaining epsilon candidates",
                 enabled=config.show_progress,
             )
+            raise RuntimeError(
+                f"RDP epsilon {epsilon:g} calibration failed unexpectedly; "
+                "aborting without retrying other epsilon candidates: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
     if chosen_epsilon is None or chosen_codebook is None:
         details = "; ".join(
             f"epsilon={result.epsilon}: {result.failure or asdict(result)}" for result in sweep

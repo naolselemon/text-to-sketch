@@ -159,6 +159,39 @@ class AnchoredV3BuilderTest(unittest.TestCase):
                     ),
                 )
 
+    def test_unexpected_calibration_error_aborts_without_retrying_epsilons(self) -> None:
+        raw_stroke = [[(x, 32) for x in range(10, 21)]]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            source.mkdir()
+            image = np.full((64, 64), 255, dtype=np.uint8)
+            cv2.line(image, (10, 32), (20, 32), 0, thickness=1)
+            cv2.imwrite(str(source / "sample.png"), image)
+
+            with patch(
+                "services.anchored_sketch_data.builder.vectorize_image",
+                return_value=raw_stroke,
+            ), patch(
+                "services.anchored_sketch_data.builder.fit_training_codebook",
+                side_effect=ValueError("invalid calibration geometry"),
+            ) as fit_codebook, self.assertRaisesRegex(
+                RuntimeError,
+                "epsilon 0.5 calibration failed unexpectedly.*without retrying",
+            ):
+                build_dataset(
+                    source,
+                    root / "output",
+                    config=BuilderConfig(
+                        epsilon_candidates=(0.5, 0.75, 1.0),
+                        calibration_size=1,
+                        train_augmentation_copies=0,
+                        show_progress=False,
+                    ),
+                )
+
+        fit_codebook.assert_called_once()
+
     def test_worker_cli_controls_are_explicit(self) -> None:
         defaults = parse_args(
             ["build", "--source-dir", "source", "--output-root", "output"]

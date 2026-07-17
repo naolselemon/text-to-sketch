@@ -79,6 +79,25 @@ class AnchoredV3PreprocessingTest(unittest.TestCase):
         )
         self.assertEqual(simplified, [[(1.0, 1.0), (5.0, 1.0)]])
 
+    def test_simplification_drops_closed_strokes_that_collapse_to_one_point(self) -> None:
+        tiny_closed_loop = [
+            (10.0, 10.0),
+            (10.25, 10.0),
+            (10.0, 10.0),
+        ]
+        drawable = [(20.0, 20.0), (25.0, 20.0)]
+
+        simplified = simplify_strokes(
+            [tiny_closed_loop, drawable],
+            epsilon=0.5,
+        )
+
+        self.assertEqual(simplified, [drawable])
+        self.assertEqual(
+            deterministic_order([[(4.0, 4.0), (4.0, 4.0)]]),
+            [],
+        )
+
     def test_endpoint_indexed_merge_matches_exhaustive_tie_breaking(self) -> None:
         rng = np.random.default_rng(9182)
         for _ in range(30):
