@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import heapq
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -201,39 +202,182 @@ def merge_compatible_strokes(
     max_gap: float = 1.5,
     minimum_cosine: float = 0.5,
 ) -> list[Stroke]:
-    paths = [list(stroke) for stroke in deterministic_order(strokes) if len(stroke) >= 2]
-    while True:
-        candidates: list[tuple[float, int, int, bool, bool]] = []
-        for first_index in range(len(paths)):
-            for second_index in range(first_index + 1, len(paths)):
-                for reverse_first in (False, True):
-                    first = list(reversed(paths[first_index])) if reverse_first else paths[first_index]
-                    first_direction = np.asarray(first[-1]) - np.asarray(first[-2])
-                    for reverse_second in (False, True):
-                        second = list(reversed(paths[second_index])) if reverse_second else paths[second_index]
-                        gap = float(np.linalg.norm(np.asarray(second[0]) - np.asarray(first[-1])))
-                        if gap > max_gap:
-                            continue
-                        second_direction = np.asarray(second[1]) - np.asarray(second[0])
-                        denominator = float(
-                            np.linalg.norm(first_direction) * np.linalg.norm(second_direction)
-                        )
-                        cosine = 1.0 if denominator == 0.0 else float(
-                            np.dot(first_direction, second_direction) / denominator
-                        )
-                        if cosine >= minimum_cosine:
-                            candidates.append(
-                                (gap, first_index, second_index, reverse_first, reverse_second)
-                            )
-        if not candidates:
-            break
-        _, first_index, second_index, reverse_first, reverse_second = min(candidates)
-        first = list(reversed(paths[first_index])) if reverse_first else paths[first_index]
-        second = list(reversed(paths[second_index])) if reverse_second else paths[second_index]
+    ordered = [list(stroke) for stroke in deterministic_order(strokes) if len(stroke) >= 2]
+    if len(ordered) < 2 or max_gap < 0:
+        return ordered
+
+    # The original implementation rebuilt every possible path pair after every
+    # merge. Detailed skeletons can contain hundreds of branch paths, making
+    # that loop cubic. Stable path IDs preserve the original tie-breaking while
+    # this heap keeps unchanged candidates and only recomputes candidates for a
+    # newly merged path.
+    paths = {index: path for index, path in enumerate(ordered)}
+    versions = {index: 0 for index in paths}
+    endpoint_index = _EndpointIndex(max_gap=max_gap)
+    for path_id, path in paths.items():
+        endpoint_index.add(path_id, path)
+
+    candidates: list[tuple[float, int, int, bool, bool, int, int]] = []
+
+    def add_pair(first_id: int, second_id: int) -> None:
+        if first_id == second_id:
+            return
+        first_id, second_id = sorted((first_id, second_id))
+        first_path = paths.get(first_id)
+        second_path = paths.get(second_id)
+        if first_path is None or second_path is None:
+            return
+        for reverse_first in (False, True):
+            first_endpoint, first_direction = _connection_endpoint_and_direction(
+                first_path,
+                reverse=reverse_first,
+                as_first=True,
+            )
+            for reverse_second in (False, True):
+                second_endpoint, second_direction = _connection_endpoint_and_direction(
+                    second_path,
+                    reverse=reverse_second,
+                    as_first=False,
+                )
+                gap = float(np.linalg.norm(second_endpoint - first_endpoint))
+                if gap > max_gap:
+                    continue
+                denominator = float(
+                    np.linalg.norm(first_direction) * np.linalg.norm(second_direction)
+                )
+                cosine = 1.0 if denominator == 0.0 else float(
+                    np.dot(first_direction, second_direction) / denominator
+                )
+                if cosine >= minimum_cosine:
+                    heapq.heappush(
+                        candidates,
+                        (
+                            gap,
+                            first_id,
+                            second_id,
+                            reverse_first,
+                            reverse_second,
+                            versions[first_id],
+                            versions[second_id],
+                        ),
+                    )
+
+    initial_pairs: set[tuple[int, int]] = set()
+    for path_id, path in paths.items():
+        for neighbor_id in endpoint_index.neighbors(path):
+            if neighbor_id != path_id:
+                initial_pairs.add(tuple(sorted((path_id, neighbor_id))))
+    for first_id, second_id in sorted(initial_pairs):
+        add_pair(first_id, second_id)
+
+    while candidates:
+        (
+            _,
+            first_id,
+            second_id,
+            reverse_first,
+            reverse_second,
+            first_version,
+            second_version,
+        ) = heapq.heappop(candidates)
+        if (
+            first_id not in paths
+            or second_id not in paths
+            or versions[first_id] != first_version
+            or versions[second_id] != second_version
+        ):
+            continue
+
+        first_path = paths[first_id]
+        second_path = paths[second_id]
+        endpoint_index.remove(first_id, first_path)
+        endpoint_index.remove(second_id, second_path)
+        first = list(reversed(first_path)) if reverse_first else first_path
+        second = list(reversed(second_path)) if reverse_second else second_path
         merged = first + second[1:] if np.allclose(first[-1], second[0]) else first + second
-        paths[first_index] = merged
-        del paths[second_index]
-    return deterministic_order(paths)
+        paths[first_id] = merged
+        versions[first_id] += 1
+        del paths[second_id]
+        del versions[second_id]
+        endpoint_index.add(first_id, merged)
+
+        for neighbor_id in sorted(endpoint_index.neighbors(merged)):
+            if neighbor_id != first_id:
+                add_pair(first_id, neighbor_id)
+
+    return deterministic_order(paths.values())
+
+
+def _connection_endpoint_and_direction(
+    path: Stroke,
+    *,
+    reverse: bool,
+    as_first: bool,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return the joining endpoint/direction without copying or reversing a path."""
+
+    if as_first:
+        endpoint_index = 0 if reverse else -1
+        adjacent_index = 1 if reverse else -2
+        endpoint = np.asarray(path[endpoint_index])
+        direction = endpoint - np.asarray(path[adjacent_index])
+    else:
+        endpoint_index = -1 if reverse else 0
+        adjacent_index = -2 if reverse else 1
+        endpoint = np.asarray(path[endpoint_index])
+        direction = np.asarray(path[adjacent_index]) - endpoint
+    return endpoint, direction
+
+
+class _EndpointIndex:
+    """Small spatial hash for paths whose endpoints can be within ``max_gap``."""
+
+    def __init__(self, *, max_gap: float) -> None:
+        self.max_gap = float(max_gap)
+        self.cells: dict[tuple[int, int] | tuple[float, float], set[int]] = {}
+
+    def add(self, path_id: int, path: Stroke) -> None:
+        for key in self._path_keys(path):
+            self.cells.setdefault(key, set()).add(path_id)
+
+    def remove(self, path_id: int, path: Stroke) -> None:
+        for key in self._path_keys(path):
+            values = self.cells.get(key)
+            if values is None:
+                continue
+            values.discard(path_id)
+            if not values:
+                del self.cells[key]
+
+    def neighbors(self, path: Stroke) -> set[int]:
+        output: set[int] = set()
+        for point in (path[0], path[-1]):
+            if self.max_gap == 0:
+                output.update(self.cells.get((float(point[0]), float(point[1])), ()))
+                continue
+            center_x, center_y = self._cell(point)
+            for offset_y in (-1, 0, 1):
+                for offset_x in (-1, 0, 1):
+                    output.update(
+                        self.cells.get((center_x + offset_x, center_y + offset_y), ())
+                    )
+        return output
+
+    def _path_keys(
+        self, path: Stroke
+    ) -> set[tuple[int, int] | tuple[float, float]]:
+        if self.max_gap == 0:
+            return {
+                (float(path[0][0]), float(path[0][1])),
+                (float(path[-1][0]), float(path[-1][1])),
+            }
+        return {self._cell(path[0]), self._cell(path[-1])}
+
+    def _cell(self, point: Sequence[float]) -> tuple[int, int]:
+        return (
+            math.floor(float(point[0]) / self.max_gap),
+            math.floor(float(point[1]) / self.max_gap),
+        )
 
 
 def deterministic_order(strokes: Sequence[Sequence[Sequence[float]]]) -> list[Stroke]:

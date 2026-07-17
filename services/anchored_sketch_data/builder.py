@@ -36,6 +36,7 @@ from .tokenizer import AnchoredTokenizer
 
 
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
+AUTO_PREPROCESSING_WORKER_LIMIT = 8
 _ProgressItem = TypeVar("_ProgressItem")
 
 
@@ -459,7 +460,6 @@ def _preprocess_sources(
         )
         materialized = list(results)
     else:
-        chunksize = min(16, max(1, len(tasks) // (workers * 8)))
         context = _multiprocessing_context()
         with context.Pool(
             processes=workers,
@@ -469,7 +469,10 @@ def _preprocess_sources(
                 pool.imap_unordered(
                     _preprocess_source,
                     tasks,
-                    chunksize=chunksize,
+                    # Return each completed image immediately. Larger chunks
+                    # hide progress and let one pathological image hold back
+                    # every other result assigned in the same chunk.
+                    chunksize=1,
                 ),
                 total=len(tasks),
                 description="Preprocessing",
@@ -552,6 +555,7 @@ def _resolve_worker_count(requested: int, image_count: int) -> int:
             available = len(os.sched_getaffinity(0))
         except AttributeError:
             available = os.cpu_count() or 1
+        available = min(int(available), AUTO_PREPROCESSING_WORKER_LIMIT)
     else:
         available = requested
     return max(1, min(int(available), int(image_count)))

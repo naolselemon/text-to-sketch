@@ -36,8 +36,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=0,
         help=(
-            "Image preprocessing processes. 0 uses all CPUs available to this "
-            "process (default: 0)."
+            "Image preprocessing processes. 0 automatically uses up to 8 CPUs "
+            "available to this process (default: 0)."
         ),
     )
     build.add_argument(

@@ -11,8 +11,12 @@ import cv2
 import numpy as np
 
 from services.anchored_sketch_data.artifacts import validate_dataset
-from services.anchored_sketch_data.builder import BuilderConfig, build_dataset
-from services.anchored_sketch_data.builder import _preprocess_sources
+from services.anchored_sketch_data.builder import (
+    BuilderConfig,
+    _preprocess_sources,
+    _resolve_worker_count,
+    build_dataset,
+)
 from services.anchored_sketch_data.cli import parse_args
 
 
@@ -177,6 +181,13 @@ class AnchoredV3BuilderTest(unittest.TestCase):
         self.assertEqual(tuned.workers, 8)
         self.assertFalse(tuned.show_progress)
 
+        with patch(
+            "services.anchored_sketch_data.builder.os.sched_getaffinity",
+            return_value=set(range(64)),
+        ):
+            self.assertEqual(_resolve_worker_count(0, image_count=1000), 8)
+            self.assertEqual(_resolve_worker_count(12, image_count=1000), 12)
+
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp)
             image = np.full((32, 32), 255, dtype=np.uint8)
@@ -247,6 +258,7 @@ class AnchoredV3BuilderTest(unittest.TestCase):
             initializer=ANY,
         )
         pool.imap_unordered.assert_called_once()
+        self.assertEqual(pool.imap_unordered.call_args.kwargs["chunksize"], 1)
         self.assertEqual(
             [sample.sample_id for sample in parallel[0]],
             [f"sample-{index}.png" for index in range(4)],

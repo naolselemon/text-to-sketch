@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from collections.abc import Sequence
 
 import numpy as np
 
@@ -78,6 +79,33 @@ class AnchoredV3PreprocessingTest(unittest.TestCase):
         )
         self.assertEqual(simplified, [[(1.0, 1.0), (5.0, 1.0)]])
 
+    def test_endpoint_indexed_merge_matches_exhaustive_tie_breaking(self) -> None:
+        rng = np.random.default_rng(9182)
+        for _ in range(30):
+            strokes = []
+            for _ in range(10):
+                start = rng.integers(-4, 5, size=2)
+                middle = start + rng.integers(-2, 3, size=2)
+                end = middle + rng.integers(-2, 3, size=2)
+                strokes.append([start.tolist(), middle.tolist(), end.tolist()])
+
+            expected = _exhaustive_merge_reference(strokes)
+            actual = merge_compatible_strokes(strokes)
+
+            self.assertEqual(actual, expected)
+
+    def test_long_mergeable_chain_is_collapsed_without_repeated_pair_scans(self) -> None:
+        strokes = [
+            [(3.0 * index, 0.0), (3.0 * index + 2.0, 0.0)]
+            for index in range(250)
+        ]
+
+        merged = merge_compatible_strokes(strokes)
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0][0], (0.0, 0.0))
+        self.assertEqual(merged[0][-1], (749.0, 0.0))
+
     def test_augmentation_is_seeded_and_does_not_modify_input(self) -> None:
         source = [[(10.0, 10.0), (20.0, 20.0)]]
 
@@ -124,6 +152,72 @@ class AnchoredV3PreprocessingTest(unittest.TestCase):
             fit_training_codebook(
                 [TrainingStrokeSample("leak", "valid", sample.strokes)], n_clusters=2
             )
+
+
+def _exhaustive_merge_reference(
+    strokes: Sequence[Sequence[Sequence[float]]],
+    *,
+    max_gap: float = 1.5,
+    minimum_cosine: float = 0.5,
+) -> list[list[tuple[float, float]]]:
+    """Previous all-pairs implementation used as a small-fixture oracle."""
+
+    paths = [list(stroke) for stroke in deterministic_order(strokes) if len(stroke) >= 2]
+    while True:
+        candidates: list[tuple[float, int, int, bool, bool]] = []
+        for first_index in range(len(paths)):
+            for second_index in range(first_index + 1, len(paths)):
+                for reverse_first in (False, True):
+                    first = (
+                        list(reversed(paths[first_index]))
+                        if reverse_first
+                        else paths[first_index]
+                    )
+                    first_direction = np.asarray(first[-1]) - np.asarray(first[-2])
+                    for reverse_second in (False, True):
+                        second = (
+                            list(reversed(paths[second_index]))
+                            if reverse_second
+                            else paths[second_index]
+                        )
+                        gap = float(
+                            np.linalg.norm(np.asarray(second[0]) - np.asarray(first[-1]))
+                        )
+                        if gap > max_gap:
+                            continue
+                        second_direction = np.asarray(second[1]) - np.asarray(second[0])
+                        denominator = float(
+                            np.linalg.norm(first_direction) * np.linalg.norm(second_direction)
+                        )
+                        cosine = 1.0 if denominator == 0.0 else float(
+                            np.dot(first_direction, second_direction) / denominator
+                        )
+                        if cosine >= minimum_cosine:
+                            candidates.append(
+                                (
+                                    gap,
+                                    first_index,
+                                    second_index,
+                                    reverse_first,
+                                    reverse_second,
+                                )
+                            )
+        if not candidates:
+            break
+        _, first_index, second_index, reverse_first, reverse_second = min(candidates)
+        first = (
+            list(reversed(paths[first_index])) if reverse_first else paths[first_index]
+        )
+        second = (
+            list(reversed(paths[second_index]))
+            if reverse_second
+            else paths[second_index]
+        )
+        paths[first_index] = (
+            first + second[1:] if np.allclose(first[-1], second[0]) else first + second
+        )
+        del paths[second_index]
+    return deterministic_order(paths)
 
 
 if __name__ == "__main__":

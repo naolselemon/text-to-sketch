@@ -418,12 +418,14 @@ tts-prepare-sketchformer-v3 build \
   --workers 0
 ```
 
-`--workers 0` automatically uses every CPU available to the process for the
-independent image vectorization and cleaning loop. Set an explicit value such
-as `--workers 12` to leave CPU capacity for other jobs. Each worker disables
-OpenCV's nested thread pool, so worker processes do not multiply into hundreds
-of competing threads. The command reports per-stage elapsed time, image rate,
-accepted/rejected counts, epsilon calibration metrics, and tqdm progress bars.
+`--workers 0` automatically uses up to eight CPUs available to the process for
+the independent image vectorization and cleaning loop. This conservative cap
+avoids memory and scheduler thrashing on large servers. Set an explicit value
+such as `--workers 12` after measuring the host if more parallelism helps. Each
+worker disables OpenCV's nested thread pool, so worker processes do not multiply
+into hundreds of competing threads. The command reports per-stage elapsed time,
+image rate, accepted/rejected counts, epsilon calibration metrics, and tqdm
+progress bars.
 Use `--no-progress` only for quiet automation. This preprocessing stage is CPU
 bound; the RTX 3090 is used later during model training, not during this build.
 
