@@ -107,7 +107,7 @@ branch such as `dev` or `main`.
 
 On GitHub, create a pull request with:
 
-- **base repository:** `Long-form-AI-video-generation/text-to-sketch`
+- **base repository:** `naolselemon/text-to-sketch`
 - **base branch:** `dev`
 - **head repository:** your fork
 - **compare branch:** your feature or fix branch
