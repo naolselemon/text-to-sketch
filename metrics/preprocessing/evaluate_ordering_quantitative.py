@@ -15,6 +15,7 @@ import numpy as np
 
 from pipeline.ordering import (
     order_continuity_greedy,
+    order_outer_to_inner,
     order_directional_bias,
     order_greedy_nearest_neighbor,
     order_tsp,
@@ -22,8 +23,10 @@ from pipeline.ordering import (
 from pipeline.stroke5 import strokes_to_stroke5
 from pipeline.vectorization import (
     THRESHOLD_PROFILES,
+    CenterlineBranch,
     read_grayscale_image,
     vectorize_image,
+    vectorize_image_with_stats,
 )
 from utils.tokenizer import ErrorFeedbackQuantizer
 
@@ -31,9 +34,10 @@ Point = tuple[int, int]
 Stroke = list[Point]
 Orderer = Callable[[list[Stroke]], list[Stroke]]
 
-METHODS = ("continuity_greedy", "directional_bias", "nn_greedy", "tsp")
+METHODS = ("continuity_greedy", "outer_to_inner", "directional_bias", "nn_greedy", "tsp")
 METHOD_LABELS = {
     "continuity_greedy": "Continuity-greedy",
+    "outer_to_inner": "Outer-to-inner",
     "directional_bias": "Directional bias",
     "nn_greedy": "NN-greedy",
     "tsp": "TSP",
@@ -236,9 +240,25 @@ def apply_orderer(
     source_strokes: list[Stroke],
     *,
     junction_tolerance: float,
+    branches: list[CenterlineBranch] | None = None,
 ) -> list[Stroke]:
     # Each method receives an independent copy because orderers may reverse paths.
     strokes = copy.deepcopy(source_strokes)
+    if method == "outer_to_inner":
+        if branches is not None:
+            return order_outer_to_inner(branches)
+        synthetic = [
+            CenterlineBranch(
+                branch_id=i,
+                points=list(s),
+                start_node_id=i * 2,
+                end_node_id=i * 2 + 1,
+                component_id=i,
+                is_loop=(len(s) > 2 and s[0] == s[-1]),
+            )
+            for i, s in enumerate(strokes)
+        ]
+        return order_outer_to_inner(synthetic)
     if method == "continuity_greedy":
         return order_continuity_greedy(
             strokes,
@@ -273,11 +293,13 @@ def evaluate_method(
     normalization_extent: float,
     min_stroke_duration: float,
     delay_between_strokes: float,
+    branches: list[CenterlineBranch] | None = None,
 ) -> dict[str, object]:
     ordered = apply_orderer(
         method,
         source_strokes,
         junction_tolerance=junction_tolerance,
+        branches=branches,
     )
     if not ordered:
         raise ValueError(f"{method} produced no output for {source_image}")
@@ -472,8 +494,8 @@ def write_markdown_summary(
                 "All methods used the same vectorized input."
             ),
             "",
-            "| Metric | Better | Continuity-greedy | Directional bias | NN-greedy | TSP |",
-            "|---|---:|---:|---:|---:|---:|",
+            f"| Metric | Better | {' | '.join(METHOD_LABELS[m] for m in METHODS)} |",
+            "|---|---:|" + "---:|" * len(METHODS),
         ]
     )
 
@@ -580,12 +602,14 @@ def main() -> None:
             flush=True,
         )
         image = read_grayscale_image(image_path)
-        source_strokes = vectorize_image(
+        branches, _ = vectorize_image_with_stats(
             image_path,
             epsilon=args.epsilon,
             method="centerline",
             threshold_profile=args.threshold_profile,
+            structured=True,
         )
+        source_strokes = [list(b.points) for b in branches if len(b.points) >= 2]
         source_strokes = [list(stroke) for stroke in source_strokes if len(stroke) >= 2]
         if not source_strokes:
             skipped.append(
@@ -609,6 +633,7 @@ def main() -> None:
                     normalization_extent=args.normalization_extent,
                     min_stroke_duration=args.min_stroke_duration,
                     delay_between_strokes=args.delay_between_strokes,
+                    branches=branches,
                 )
             )
 

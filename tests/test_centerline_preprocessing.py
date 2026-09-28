@@ -11,6 +11,7 @@ from metrics.preprocessing.evaluate_centerline_preprocessing import (
     parse_extractor_dirs,
     select_common_samples,
 )
+from pipeline.ordering import order_outer_to_inner
 from pipeline.lineart import _to_grayscale
 from pipeline.stroke5 import stroke5_to_canvas_strokes, strokes_to_stroke5
 from pipeline.vectorization import (
@@ -155,6 +156,39 @@ class CenterlinePreprocessingTest(unittest.TestCase):
         actual = rasterize_strokes(restored, (64, 64))
 
         self.assertGreaterEqual(centerline_metrics(expected, actual).f1, 0.99)
+
+    def test_outer_to_inner_orders_outer_structures_before_inner(self) -> None:
+        image = np.full((96, 96), 255, dtype=np.uint8)
+        # Outer circle (periphery)
+        cv2.circle(image, (48, 48), 35, 0, thickness=2)
+        # Inner detail (center)
+        cv2.line(image, (40, 48), (56, 48), 0, thickness=2)
+        cv2.line(image, (48, 40), (48, 56), 0, thickness=2)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            file_path = Path(tmp) / "outer_inner.png"
+            cv2.imwrite(str(file_path), image)
+            branches, _ = vectorize_image_with_stats(
+                file_path,
+                epsilon=0.0,
+                method="centerline",
+                threshold_profile="legacy",
+                structured=True,
+            )
+
+        ordered = order_outer_to_inner(branches)
+        self.assertGreater(len(ordered), 0)
+
+        # Confirm the first stroke is located further from the center than the last stroke
+        cx, cy = 48.0, 48.0
+        r_first = sum(((pt[0] - cx)**2 + (pt[1] - cy)**2)**0.5 for pt in ordered[0]) / len(ordered[0])
+        r_last = sum(((pt[0] - cx)**2 + (pt[1] - cy)**2)**0.5 for pt in ordered[-1]) / len(ordered[-1])
+        self.assertGreater(r_first, r_last)
+
+        # Confirm rasterization retains fidelity
+        rendered = rasterize_strokes(ordered, image.shape)
+        reference = source_centerline(image, threshold_profile="legacy")
+        self.assertGreater(centerline_metrics(reference, rendered).f1, 0.95)
 
     def test_extractor_benchmark_uses_identical_relative_samples(self) -> None:
         image = np.full((8, 8), 255, dtype=np.uint8)
