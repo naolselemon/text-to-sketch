@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -12,6 +14,7 @@ from typing import Any
 import numpy as np
 import torch
 
+from metrics.sketchformer.free_running import decode_token_sequence
 from pipeline.stroke5 import Stroke5Transform
 from utils.tokenizer import decode_tokens
 
@@ -29,6 +32,10 @@ class ReconstructionExample:
     sample_id: str | None = None
     source_image_path: str | None = None
     canvas_transform: Stroke5Transform | None = None
+    prediction_length: int | None = None
+    decode_mode: str = "teacher-forced"
+    coordinate_mode: str = "target-normalized"
+    statistics: Mapping[str, float | int | str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -69,6 +76,8 @@ def collect_reconstruction_examples(
     *,
     max_examples: int,
     codebook: np.ndarray | None = None,
+    token_layout: Mapping[str, Any] | None = None,
+    coordinate_mode: str | None = None,
 ) -> list[ReconstructionExample]:
     """Collect a small CPU copy of target and predicted stroke3 sequences."""
 
@@ -118,6 +127,7 @@ def collect_reconstruction_examples(
         source_index = int(source_indices[row]) if source_indices is not None else row
         if token_logits is not None:
             assert codebook is not None
+            assert codebook is not None
             prediction_length = min(
                 (
                     int(prediction_lengths[row])
@@ -126,13 +136,15 @@ def collect_reconstruction_examples(
                 ),
                 predictions.shape[1],
             )
-            target = decode_tokens(
+            target = decode_token_sequence(
                 np.asarray(targets[row, :length], dtype=np.int64),
                 codebook,
+                token_layout=token_layout,
             )
-            prediction = decode_tokens(
+            prediction = decode_token_sequence(
                 np.asarray(predictions[row, :prediction_length], dtype=np.int64),
                 codebook,
+                token_layout=token_layout,
             )
         else:
             target = np.asarray(targets[row, :length], dtype=np.float32)
@@ -146,6 +158,12 @@ def collect_reconstruction_examples(
                 source_index=source_index,
                 label=label,
                 sample_id=str(sample_ids[row]) if sample_ids is not None else None,
+                prediction_length=length,
+                decode_mode="teacher-forced",
+                coordinate_mode=(
+                    coordinate_mode
+                    or ("canvas" if _is_v3_layout(token_layout) else "target-normalized")
+                ),
             )
         )
     return examples
@@ -304,6 +322,9 @@ def collect_generated_reconstruction_examples(
     *,
     max_examples: int,
     codebook: np.ndarray,
+    token_layout: Mapping[str, Any] | None = None,
+    records: list[Mapping[str, float | int | str]] | None = None,
+    coordinate_mode: str | None = None,
 ) -> list[ReconstructionExample]:
     """Collect target/free-running prediction pairs for qualitative plots."""
 
@@ -326,13 +347,15 @@ def collect_generated_reconstruction_examples(
     for row in range(min(max_examples, targets.shape[0])):
         target_length = min(int(lengths[row]), targets.shape[1])
         prediction_length = min(int(prediction_lengths[row]), predictions.shape[1])
-        target = decode_tokens(
+        target = decode_token_sequence(
             np.asarray(targets[row, :target_length], dtype=np.int64),
             codebook,
+            token_layout=token_layout,
         )
-        prediction = decode_tokens(
+        prediction = decode_token_sequence(
             np.asarray(predictions[row, :prediction_length], dtype=np.int64),
             codebook,
+            token_layout=token_layout,
         )
         examples.append(
             ReconstructionExample(
@@ -345,6 +368,13 @@ def collect_generated_reconstruction_examples(
                 ),
                 label=int(labels[row]) if labels is not None else None,
                 sample_id=str(sample_ids[row]) if sample_ids is not None else None,
+                prediction_length=prediction_length,
+                decode_mode="free-running",
+                coordinate_mode=(
+                    coordinate_mode
+                    or ("canvas" if _is_v3_layout(token_layout) else "target-normalized")
+                ),
+                statistics=(dict(records[row]) if records is not None else {}),
             )
         )
     return examples
@@ -367,8 +397,9 @@ def write_metrics_report(
     logs: Mapping[str, torch.Tensor | float | int],
     *,
     metadata: Mapping[str, Any] | None = None,
+    records: list[Mapping[str, Any]] | None = None,
 ) -> Path:
-    """Write a compact JSON report for an evaluation run."""
+    """Write a JSON report with aggregates and optional per-sample diagnostics."""
 
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -377,5 +408,47 @@ def write_metrics_report(
         "metrics": tensor_logs_to_floats(logs),
         "metadata": dict(metadata or {}),
     }
-    path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if records is not None:
+        report["records"] = [_json_safe_mapping(record) for record in records]
+    payload = json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n"
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+            delete=False,
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+            temporary.write(payload)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.replace(temporary_path, path)
+    except Exception:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+        raise
     return path
+
+
+def _json_safe_mapping(values: Mapping[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in values.items():
+        if torch.is_tensor(value):
+            result[str(key)] = value.detach().cpu().item()
+        elif isinstance(value, np.generic):
+            result[str(key)] = value.item()
+        else:
+            result[str(key)] = value
+    return result
+
+
+def _is_v3_layout(token_layout: Mapping[str, Any] | None) -> bool:
+    layout = token_layout or {}
+    return str(layout.get("version", layout.get("token_layout_version", ""))).lower() in {
+        "3",
+        "v3",
+        "anchored_v3",
+    }

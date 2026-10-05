@@ -9,7 +9,7 @@ from typing import Any
 import torch
 from torch import nn
 
-from core.checkpointing import save_checkpoint
+from core.checkpointing import CheckpointContract, CheckpointContractError, save_checkpoint
 
 
 @dataclass
@@ -47,6 +47,8 @@ class CheckpointCallback:
     monitor: str = "val/token_loss"
     mode: str = "min"
     save_last: bool = True
+    contract: CheckpointContract | dict[str, Any] | None = None
+    require_contract: bool = True
 
     def __post_init__(self) -> None:
         self.directory = Path(self.directory)
@@ -61,8 +63,18 @@ class CheckpointCallback:
         epoch: int,
         step: int,
         metrics: dict[str, Any],
+        training_state: dict[str, Any] | None = None,
     ) -> dict[str, Path]:
+        if self.require_contract and self.contract is None:
+            raise CheckpointContractError(
+                "CheckpointCallback requires an artifact contract. Pass the composed "
+                "config, token layout version, codebook hash, manifest hash, and git commit."
+            )
         saved: dict[str, Path] = {}
+        improved = self.tracker.update(metrics)
+        checkpoint_metrics = dict(metrics)
+        if self.tracker.best is not None:
+            checkpoint_metrics["checkpoint/best_metric"] = self.tracker.best
         if self.save_last:
             saved["last"] = save_checkpoint(
                 self.directory / "last.pt",
@@ -71,9 +83,12 @@ class CheckpointCallback:
                 scheduler=scheduler,
                 epoch=epoch,
                 step=step,
-                metrics=metrics,
+                metrics=checkpoint_metrics,
+                training_state=training_state,
+                contract=self.contract,
+                require_contract=self.require_contract,
             )
-        if self.tracker.update(metrics):
+        if improved:
             saved["best"] = save_checkpoint(
                 self.directory / "best.pt",
                 model,
@@ -81,6 +96,9 @@ class CheckpointCallback:
                 scheduler=scheduler,
                 epoch=epoch,
                 step=step,
-                metrics=metrics,
+                metrics=checkpoint_metrics,
+                training_state=training_state,
+                contract=self.contract,
+                require_contract=self.require_contract,
             )
         return saved

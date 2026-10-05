@@ -2,8 +2,10 @@
 
 from metrics.sketchformer.free_running import (
     aggregate_free_running_records,
+    decode_token_sequence,
     free_running_reconstruction_metrics,
     free_running_reconstruction_records,
+    stroke_geometry_metrics,
 )
 from metrics.sketchformer.reconstruction import (
     ReconstructionExample,
@@ -18,6 +20,8 @@ __all__ = [
     "free_running_reconstruction_metrics",
     "free_running_reconstruction_records",
     "aggregate_free_running_records",
+    "decode_token_sequence",
+    "stroke_geometry_metrics",
     "ReconstructionExample",
     "collect_generated_reconstruction_examples",
     "collect_reconstruction_examples",

@@ -60,13 +60,25 @@ def build_scheduler(
         return SchedulerBundle(None, interval=interval, frequency=frequency)
 
     if scheduler_type == "cosine_with_warmup":
+        warmup_steps = int(scheduler_config.get("warmup_steps", 0))
+        if "warmup_fraction" in scheduler_config:
+            if total_steps is None:
+                raise ValueError("warmup_fraction requires total_steps")
+            fraction = float(scheduler_config["warmup_fraction"])
+            if not 0.0 <= fraction <= 1.0:
+                raise ValueError("warmup_fraction must be between 0 and 1")
+            warmup_steps = math.ceil(total_steps * fraction)
+            warmup_steps = min(
+                warmup_steps,
+                int(scheduler_config.get("warmup_cap_steps", warmup_steps)),
+            )
         base_lr = float(optimizer.param_groups[0]["lr"])
         min_lr = float(scheduler_config.get("min_lr", 0.0))
         min_lr_ratio = min_lr / base_lr if base_lr > 0 else 0.0
         scheduler = LambdaLR(
             optimizer,
             _cosine_with_warmup_lambda(
-                warmup_steps=int(scheduler_config.get("warmup_steps", 0)),
+                warmup_steps=warmup_steps,
                 total_steps=total_steps,
                 min_lr_ratio=min_lr_ratio,
             ),

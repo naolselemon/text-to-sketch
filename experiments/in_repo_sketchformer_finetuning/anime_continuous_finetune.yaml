@@ -17,7 +17,7 @@ research_objective:
 launch:
   dry_run: "python scripts/sketchformer/train.py --experiment anime_continuous_finetune --dry-run"
   train: "python scripts/sketchformer/train.py --experiment anime_continuous_finetune"
-  evaluate: "python scripts/sketchformer/evaluate.py --experiment anime_continuous_finetune --checkpoint weights/finetuned/sketchformer-continuous-anime/last.pt"
+  evaluate: "python scripts/sketchformer/evaluate.py --experiment anime_continuous_finetune --checkpoint weights/finetuned/sketchformer-continuous-anime/last.pt --allow-legacy-checkpoint"
   export: "python scripts/sketchformer/export.py --experiment anime_continuous_finetune --checkpoint weights/finetuned/sketchformer-continuous-anime/last.pt --output weights/finetuned/sketchformer-continuous-anime/export.pt"
 
 expected_data:

@@ -1,0 +1,29 @@
+inherits: anime_anchored_v3_direct
+name: anime_anchored_v3_overfit
+description: Mandatory 32-sketch FP32 overfit gate for anchored V3.
+
+run:
+  id: anime-anchored-v3-overfit
+  output_dir: weights/finetuned/sketchformer-anchored-v3-overfit
+
+overrides:
+  data:
+    dataset:
+      root: data/processed/sketchformer-ready-data/anchored-v3/current
+      manifest_file: manifest.jsonl
+      train_source_limit: 32
+      include_augmentations: false
+      source_subset_strategy: length_stratified
+  trainer:
+    runtime:
+      precision: 32-true
+    training:
+      max_epochs: 100
+    curriculum:
+      enabled: false
+    exposure:
+      enabled: false
+    gates:
+      overfit_mode: true
+      require_overfit_report: false
+      overfit_report: null

@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
+
+import numpy as np
+import torch
 
 
 @dataclass(frozen=True)
@@ -31,7 +35,12 @@ def build_loss_weights(config: Mapping[str, Any]) -> LossWeights:
     )
 
 
-def build_loss(config: Mapping[str, Any]):
+def build_loss(
+    config: Mapping[str, Any],
+    *,
+    data_config: Mapping[str, Any] | None = None,
+    project_root: str | Path | None = None,
+):
     """Build the concrete loss object once ``core.losses`` is available."""
 
     try:
@@ -42,4 +51,26 @@ def build_loss(config: Mapping[str, Any]):
             "create the training loss object."
         ) from exc
 
-    return SketchformerLoss(build_loss_weights(config))
+    anchored_objective = None
+    if data_config is not None and str(data_config.get("format", {}).get("type")) == "anchored_v3":
+        from core.anchored_v3_objective import (
+            AnchoredV3Objective,
+            AnchoredV3ObjectiveConfig,
+        )
+
+        token_dictionary = data_config["format"]["token_dictionary"]
+        codebook_path = Path(token_dictionary["codebook_path"])
+        if not codebook_path.is_absolute():
+            codebook_path = Path(project_root or Path.cwd()) / codebook_path
+        codebook = torch.from_numpy(np.load(codebook_path).astype(np.float32, copy=False))
+        anchored_objective = AnchoredV3Objective(
+            AnchoredV3ObjectiveConfig.from_mapping(
+                token_dictionary,
+                config.get("loss_weights", config),
+            ),
+            codebook,
+        )
+    return SketchformerLoss(
+        build_loss_weights(config),
+        anchored_objective=anchored_objective,
+    )

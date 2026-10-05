@@ -59,6 +59,43 @@ def extractor_output_name(extractor: str) -> str:
     return extractor.replace("-", "_")
 
 
+def autocrop_black_borders(image: "Image.Image", threshold: float = 12.0) -> "Image.Image":
+    """Detect and crop solid black pillarbox/letterbox padding on all four sides.
+
+    Converts the image to grayscale, computes per-row and per-column mean
+    brightness, and crops to the bounding box of pixels whose mean exceeds
+    ``threshold``.  Images without detectable padding (margin <= 2px) are
+    returned unchanged.
+
+    Args:
+        image: RGB or RGBA PIL image to crop.
+        threshold: Pixel-brightness mean below which a row/column is
+            considered solid-black padding (0-255 scale).
+
+    Returns:
+        Cropped PIL image, or the original image if no padding was detected.
+    """
+    import numpy as np
+
+    gray = image.convert("L")
+    np_img = np.asarray(gray, dtype=np.float32)
+
+    col_means = np_img.mean(axis=0)
+    valid_cols = np.where(col_means > threshold)[0]
+    row_means = np_img.mean(axis=1)
+    valid_rows = np.where(row_means > threshold)[0]
+
+    if len(valid_cols) == 0 or len(valid_rows) == 0:
+        return image
+
+    left, right = int(valid_cols[0]), int(valid_cols[-1]) + 1
+    top, bottom = int(valid_rows[0]), int(valid_rows[-1]) + 1
+
+    if left > 2 or right < image.width - 2 or top > 2 or bottom < image.height - 2:
+        return image.crop((left, top, right, bottom))
+    return image
+
+
 def create_extractor(
     extractor: str,
     detect_resolution: int,
@@ -104,6 +141,7 @@ class ControlNetLineartAnimeExtractor:
     def extract(self, src: Path) -> Image.Image:
         with Image.open(src) as image:
             image = ImageOps.exif_transpose(image).convert("RGB")
+            image = autocrop_black_borders(image)
             detected = self.detector(
                 image,
                 detect_resolution=self.detect_resolution,

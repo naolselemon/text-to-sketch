@@ -9,7 +9,7 @@ purpose:
 launch:
   dry_run: "python scripts/sketchformer/train.py --experiment smoke_test --dry-run"
   train: "python scripts/sketchformer/train.py --experiment smoke_test"
-  evaluate: "python scripts/sketchformer/evaluate.py --experiment smoke_test --checkpoint weights/finetuned/smoke_test/last.pt"
+  evaluate: "python scripts/sketchformer/evaluate.py --experiment smoke_test --checkpoint weights/finetuned/smoke_test/last.pt --allow-legacy-checkpoint"
   export: "python scripts/sketchformer/export.py --experiment smoke_test --checkpoint weights/finetuned/smoke_test/last.pt --output weights/finetuned/smoke_test/export.pt"
 
 expected_data:

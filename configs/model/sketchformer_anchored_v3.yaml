@@ -1,0 +1,72 @@
+name: sketchformer_anchored_v3_direct
+framework: pytorch
+
+input:
+  type: tok_dict
+  max_seq_len: 4096
+
+architecture:
+  d_model: 128
+  latent_dim: 128
+  pool_hidden_dim: 256
+  pooling_mode: tf_self_attn_v1
+  latent_expander_mode: tf_dense
+  num_encoder_layers: 4
+  num_decoder_layers: 4
+  num_heads: 8
+  dim_feedforward: 512
+  dropout: 0.1
+  activation: relu
+  norm_first: false
+  use_final_norm: false
+  layer_norm_eps: 0.000001
+  use_layer_norm: true
+  gradient_checkpointing: true
+
+embedding:
+  combine_method: add
+  positional_encoding:
+    type: sinusoidal
+    max_length: 4096
+    checkpoint_extension: interpolate_then_random_init
+
+encoder:
+  use_attention_mask: true
+  use_padding_mask: true
+  attention:
+    implementation: sdpa
+    preferred_backend: flash
+    allow_flash: true
+    allow_memory_efficient: true
+    allow_math_fallback: true
+
+decoder:
+  autoregressive: true
+  blind_decoder_mask: false
+  memory_source: encoder
+  tie_token_weights: true
+  generation_grammar: anchored_v3
+  attention:
+    implementation: sdpa
+    preferred_backend: flash
+    allow_flash: true
+    allow_memory_efficient: true
+    allow_math_fallback: true
+
+heads:
+  reconstruction:
+    enabled: true
+    target: tok_dict
+  classification:
+    enabled: false
+    num_classes: 345
+    dropout: 0.1
+
+checkpoint:
+  load_converted_weights: false
+  converted_weights_path: null
+  strict: true
+
+compile:
+  enabled: false
+  mode: default

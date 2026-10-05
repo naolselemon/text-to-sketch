@@ -65,3 +65,53 @@ The long-sequence fields are:
 
 Curriculum loaders filter by complete sequence length. They never shorten an
 example to make it enter an earlier stage.
+
+## Anchored V3
+
+`data/anime_anchored_v3.yaml`, `model/sketchformer_anchored_v3.yaml`, and
+`experiment/anime_anchored_v3_direct.yaml` define the target-faithful path.
+The stable contract is:
+
+- format `anchored_v3`, version `3`, fixed 256×256 canvas;
+- vocabulary size `2566`, with motion `1..2048`, X `2049..2304`, Y
+  `2305..2560`, `STROKE_START=2561`, `STROKE_END=2562`, `SOS=2563`,
+  `EOS=2564`, and `MASK=2565`;
+- direct, mask-aware encoder memory instead of the single-vector latent
+  expander;
+- complete-stroke windows for early curriculum stages, never token truncation;
+- free-running macro median F1@2px as the best-checkpoint metric.
+
+`experiment/anime_anchored_v3_overfit.yaml` disables augmentation, exposure
+corruption, and the full-run gate for the mandatory 32-sample FP32 check. The
+full experiment refuses to start until its overfit report passes all three
+thresholds.
+
+The configured `data.dataset.root`, `manifest.jsonl`, and `codebook.npy` are a
+single immutable unit. Checkpoints store their hashes plus the full composed
+config, a strict compatibility projection, and token-layout version. The
+runtime resolves the `current` symlink once to its content-hashed directory.
+`data.dataset.minimum_source_sketches` is a positive configurable cleaned-source
+floor, defaults to `1`, and can be overridden consistently with
+`--minimum-source-sketches`. It remains in checkpoint compatibility so resume
+and evaluation cannot silently change the selected requirement. Explicit
+manifest paths are rejected unless they resolve to that same pinned artifact.
+The
+projection excludes only operational output/resume/initialization/report paths.
+Resume and evaluation therefore require the same model, data, training, and
+pinned artifact settings. Do not retarget the `current` dataset symlink during
+a run. V2 checkpoints remain under V2 configs and cannot resume V3.
+
+For a scaling study, keep one immutable root and choose any increasing positive
+`--train-source-limit` values that do not exceed the number of accepted original
+training sketches. The manifest reader uses one seeded ordering, so the subsets
+are nested while validation/test membership and the codebook stay fixed. Omit
+the option for the full training split and pass the same limit to strict
+evaluation. Use repeatable `tts-build-sketchformer-v3-scaling-curve --report
+LIMIT PATH` arguments, with one final `--report full PATH`, to verify identical
+held-out sample order and aggregate the reports.
+
+If both full-scale train and validation median F1@2px remain more than 0.05
+below the 0.95 target after the narrow model passes the overfit gate, use
+`anime_anchored_v3_wide`. It changes only V3 capacity to `d_model=256`, six
+encoder/decoder layers, and a 1024-wide feed-forward block. Rerun only the
+largest limited point and full stages; do not widen V2.

@@ -150,13 +150,24 @@ class LongSequenceTest(unittest.TestCase):
             max_tokens=4096,
             max_batch_size=8,
             shuffle=False,
+            pad_to_multiple_of=8,
         )
 
         batches = list(sampler)
 
         self.assertEqual(sorted(index for batch in batches for index in batch), list(range(len(lengths))))
         for batch in batches:
-            self.assertLessEqual(max(lengths[index] for index in batch) * len(batch), 4096)
+            padded = ((max(lengths[index] for index in batch) + 7) // 8) * 8
+            self.assertLessEqual(padded * len(batch), 4096)
+
+        regression = TokenBudgetBatchSampler(
+            [585] * 7,
+            max_tokens=4096,
+            max_batch_size=8,
+            shuffle=False,
+            pad_to_multiple_of=8,
+        )
+        self.assertEqual([len(batch) for batch in regression], [6, 1])
 
     def test_shuffled_token_budget_sampler_length_is_stable(self) -> None:
         sampler = TokenBudgetBatchSampler(

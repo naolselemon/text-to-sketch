@@ -1,0 +1,33 @@
+inherits: anime_anchored_v3_direct
+name: anime_anchored_v3_wide
+description: Conditional 256-D anchored-V3 fallback after measured narrow-model underfit.
+
+run:
+  id: anime-anchored-v3-wide
+  output_dir: weights/finetuned/sketchformer-anchored-v3-wide
+
+pretrained:
+  use_converted_sketchformer_weights: true
+  path: weights/pretrained/sketchformer_anchored_v3_wide_transformer_init.pt
+  mode: strict
+  strict: true
+
+overrides:
+  model:
+    name: sketchformer_anchored_v3_wide
+    architecture:
+      d_model: 256
+      latent_dim: 128
+      num_encoder_layers: 6
+      num_decoder_layers: 6
+      num_heads: 8
+      dim_feedforward: 1024
+      dropout: 0.1
+      activation: relu
+      norm_first: false
+      use_final_norm: false
+      layer_norm_eps: 0.000001
+      gradient_checkpointing: true
+      pooling_mode: tf_self_attn_v1
+      pool_hidden_dim: 256
+      latent_expander_mode: tf_dense
