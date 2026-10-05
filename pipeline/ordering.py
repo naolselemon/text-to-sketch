@@ -122,18 +122,10 @@ def order_continuity_greedy(
 # Strategy D – Topology-Aware Continuity
 
 
-def order_continuity_topology(
+def _assemble_topology_chains(
     branches: list[CenterlineBranch],
 ) -> list[list[tuple[int, int]]]:
-    """Order strokes using skeleton graph topology for true connectivity.
-
-    Branches are joined only when their endpoints share the same skeleton
-    graph-node ID.  At junctions, the smoothest continuation is chosen via
-    turn cost.  Disconnected components remain separate strokes; endpoint
-    distance is used only to order those separate strokes, never to join them.
-    Closed loops are preserved as complete strokes.
-    """
-
+    """Join skeleton branches using exact skeleton graph topology into continuous strokes."""
     if not branches:
         return []
 
@@ -196,10 +188,207 @@ def order_continuity_topology(
 
         strokes.append(chain)
 
+    return strokes
+
+
+
+def _order_outer_to_inner_chains(
+    strokes: list[list[tuple[int, int]]],
+    outer_band_fraction: float = 0.20,
+    local_threshold: float = 40.0,
+    inner_junction_tolerance: float | None = None,
+) -> list[list[tuple[int, int]]]:
+    """Order continuous chains from outermost concentric perimeter inward.
+
+    Uses layer clustering and adaptive proximity thresholds:
+    1. Pre-computes sketch centroid and partitions strokes into discrete concentric
+       radial shell clusters from outside in.
+    2. Priority 1: If an outer-layer stroke is within `local_threshold`, stay on the
+       outer shell and draw it.
+    3. Priority 2: If all remaining outer strokes in the active layer are far (> `local_threshold`),
+       check for nearby strokes in inner layers (distance <= `inner_threshold`). If found,
+       transition smoothly to the closest inner stroke (breaking ties by outer radius)
+       to maintain continuous local flow and avoid wasteful cross-canvas jumps.
+    4. Priority 3: After drawing that stroke, the new pen position is checked again against
+       the active outer layer: if an outer stroke is now within `local_threshold`, the pen
+       snaps back to complete the outer shell before advancing.
+    5. Fallback: If no stroke is nearby in either layer, fly across to the closest stroke
+       in the active outer layer.
+    """
+    if len(strokes) <= 1:
+        return strokes
+
+    all_points = [pt for s in strokes for pt in s]
+    n_pts = len(all_points)
+    cx = sum(pt[0] for pt in all_points) / n_pts
+    cy = sum(pt[1] for pt in all_points) / n_pts
+
+    # 1. Precalculate stroke center distances and endpoints once
+    stroke_items = []
+    for s in strokes:
+        r = sum(math.hypot(pt[0] - cx, pt[1] - cy) for pt in s) / len(s)
+        stroke_items.append({
+            "stroke": list(s),
+            "radius": r,
+            "start": s[0],
+            "end": s[-1],
+        })
+
+    radii = [item["radius"] for item in stroke_items]
+    max_r, min_r = max(radii), min(radii)
+    r_span = max(1.0, max_r - min_r)
+
+    # 2. Cluster into discrete concentric radial layers up front
+    n_layers = max(1, int(round(1.0 / outer_band_fraction)))
+    layer_width = r_span * outer_band_fraction
+    layers: list[list[dict[str, Any]]] = [[] for _ in range(n_layers)]
+    for item in stroke_items:
+        idx = int((max_r - item["radius"]) / max(0.001, layer_width))
+        idx = min(n_layers - 1, max(0, idx))
+        item["layer"] = idx
+        layers[idx].append(item)
+
+    # Sort outermost layer by radius to pick initial outermost stroke
+    layers[0].sort(key=lambda x: x["radius"], reverse=True)
+    ordered: list[list[tuple[int, int]]] = []
+
+    # Pick outermost stroke first from the first non-empty outer layer
+    active_layer_idx = 0
+    while active_layer_idx < n_layers and not layers[active_layer_idx]:
+        active_layer_idx += 1
+
+    first = layers[active_layer_idx].pop(0)
+    active = first["stroke"]
+    # Orient outside-in
+    d_start_sq = (active[0][0] - cx) ** 2 + (active[0][1] - cy) ** 2
+    d_end_sq = (active[-1][0] - cx) ** 2 + (active[-1][1] - cy) ** 2
+    if d_end_sq > d_start_sq:
+        active.reverse()
+    ordered.append(active)
+
+    local_thresh_sq = local_threshold ** 2
+    inner_tol = local_threshold if inner_junction_tolerance is None else inner_junction_tolerance
+    inner_tol_sq = inner_tol ** 2
+
+    def pen_dist_sq(item: dict[str, Any], curr_x: int, curr_y: int) -> float:
+        s_x, s_y = item["start"]
+        e_x, e_y = item["end"]
+        d1 = (curr_x - s_x) ** 2 + (curr_y - s_y) ** 2
+        d2 = (curr_x - e_x) ** 2 + (curr_y - e_y) ** 2
+        return d1 if d1 < d2 else d2
+
+    remaining_count = sum(len(l) for l in layers)
+
+    while remaining_count > 0:
+        curr_x, curr_y = ordered[-1][-1]
+
+        # Advance active layer if current outer layer is exhausted
+        while active_layer_idx < n_layers and not layers[active_layer_idx]:
+            active_layer_idx += 1
+
+        if active_layer_idx >= n_layers:
+            break
+
+        current_outer_layer = layers[active_layer_idx]
+
+        # Constrained search: search ONLY within the active outer layer
+        best_outer_idx = min(
+            range(len(current_outer_layer)),
+            key=lambda i: pen_dist_sq(current_outer_layer[i], curr_x, curr_y),
+        )
+        best_outer_item = current_outer_layer[best_outer_idx]
+        best_outer_d_sq = pen_dist_sq(best_outer_item, curr_x, curr_y)
+
+        # Priority 1: If an outer-layer stroke is within local_threshold, stay on outer shell
+        if best_outer_d_sq <= local_thresh_sq:
+            chosen_layer_idx = active_layer_idx
+            chosen_idx = best_outer_idx
+        else:
+            # Priority 2: Outer strokes in active layer are far (> local_threshold).
+            # Check for nearby strokes in inner layers (within inner_tol)
+            touching_inner: list[tuple[float, float, int, int]] = []
+            for l_idx in range(active_layer_idx + 1, n_layers):
+                for item_idx, inner_item in enumerate(layers[l_idx]):
+                    d_sq = pen_dist_sq(inner_item, curr_x, curr_y)
+                    if d_sq <= inner_tol_sq:
+                        touching_inner.append((d_sq, -inner_item["radius"], l_idx, item_idx))
+
+            if touching_inner:
+                # Pick the nearby inner stroke with closest endpoint, breaking ties by outer radius
+                touching_inner.sort()
+                _, _, chosen_layer_idx, chosen_idx = touching_inner[0]
+            else:
+                # Priority 3 (Fallback): No local continuation available; fly to closest outer stroke
+                chosen_layer_idx = active_layer_idx
+                chosen_idx = best_outer_idx
+
+        # Pop from chosen layer
+        chosen = layers[chosen_layer_idx].pop(chosen_idx)
+        remaining_count -= 1
+        next_stroke = chosen["stroke"]
+
+        # Orient next stroke smoothly from current_end
+        s_x, s_y = chosen["start"]
+        e_x, e_y = chosen["end"]
+        d_end = (curr_x - e_x) ** 2 + (curr_y - e_y) ** 2
+        d_start = (curr_x - s_x) ** 2 + (curr_y - s_y) ** 2
+        if d_end < d_start:
+            next_stroke.reverse()
+
+        ordered.append(next_stroke)
+
+    return ordered
+
+
+def order_continuity_topology(
+    branches: list[CenterlineBranch],
+) -> list[list[tuple[int, int]]]:
+    """Order strokes using skeleton graph topology for true connectivity.
+
+    Branches are joined only when their endpoints share the same skeleton
+    graph-node ID.  At junctions, the smoothest continuation is chosen via
+    turn cost.  Disconnected components remain separate strokes; endpoint
+    distance is used only to order those separate strokes, never to join them.
+    Closed loops are preserved as complete strokes.
+    """
+    if not branches:
+        return []
+
+    strokes = _assemble_topology_chains(branches)
     if len(strokes) > 1:
         strokes = _order_strokes_by_distance(strokes)
-
     return strokes
+
+
+# Strategy E – Outer-to-Inner Continuity (Radial Perimeter to Core)
+
+
+def order_outer_to_inner(
+    branches: list[CenterlineBranch],
+    *,
+    outer_band_fraction: float = 0.20,
+    local_threshold: float = 40.0,
+    inner_junction_tolerance: float | None = None,
+) -> list[list[tuple[int, int]]]:
+    """Order strokes from outermost contours inward using skeleton topology.
+
+    1. Joins connected skeleton branches into continuous curves and closed loops
+       using skeleton graph node IDs (topology-aware chain assembly).
+    2. Imposes concentric radial shell outer-to-inner ordering on the assembled
+       chains with adaptive thresholding: follows touching inner branches when
+       outer strokes are far, snapping back to outer strokes whenever nearby.
+    """
+    if not branches:
+        return []
+
+    chains = _assemble_topology_chains(branches)
+
+    return _order_outer_to_inner_chains(
+        chains,
+        outer_band_fraction=outer_band_fraction,
+        local_threshold=local_threshold,
+        inner_junction_tolerance=inner_junction_tolerance,
+    )
 
 
 def _pick_smooth_forward(
