@@ -26,10 +26,12 @@ from pipeline.lineart import (
     ANIME2SKETCH,
     LINEART_ANIME,
     SUPPORTED_EXTRACTORS,
+    check_preprocessing_config,
     collect_images,
     create_extractor,
     extractor_output_name,
     process_image,
+    write_preprocessing_config,
 )
 
 load_dotenv()
@@ -135,6 +137,18 @@ def parse_args() -> argparse.Namespace:
         default=float(os.getenv("ANIME2SKETCH_CLAHE_CLIP", "-1")),
         help="Anime2Sketch CLAHE clip limit; values <= 0 disable it.",
     )
+
+    parser.add_argument(
+        "--no-autocrop",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable automatic cropping of black letterbox/pillarbox borders. "
+            "Use this when resuming extraction on a directory that was started "
+            "without autocrop, or when inputs have dark backgrounds that should "
+            "not be cropped."
+        ),
+    )
     args = parser.parse_args()
     if args.max_images is not None and args.max_per_folder is not None:
         parser.error("--max-images and --max-per-folder cannot be used together.")
@@ -180,6 +194,7 @@ def main() -> None:
             args.extractor,
             detect_resolution=args.detect_resolution,
             image_resolution=args.image_resolution,
+            autocrop=not args.no_autocrop,
             anime2sketch_dir=args.anime2sketch_dir,
             anime2sketch_python=args.anime2sketch_python,
             anime2sketch_model=args.anime2sketch_model,
@@ -190,8 +205,13 @@ def main() -> None:
         print(f"[ERROR] Could not initialize extractor: {exc}", file=sys.stderr)
         sys.exit(1)
 
+    autocrop_enabled = not args.no_autocrop
+    check_preprocessing_config(output_root, autocrop=autocrop_enabled)
+    write_preprocessing_config(output_root, autocrop=autocrop_enabled)
+
     print(f"[init] Scanning {input_root} …")
     print(f"[init] Extractor: {args.extractor}")
+    print(f"[init] Autocrop: {'enabled' if not args.no_autocrop else 'disabled'}")
     print(f"[init] Output: {output_root}")
     if args.used_deprecated_max_per_folder:
         print("[warn] --max-per-folder is deprecated; use --max-images instead.")
