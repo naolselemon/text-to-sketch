@@ -183,6 +183,15 @@ class CollateAndMaskTest(unittest.TestCase):
             _write_chunk(root / "train_000.npz", [3, 5])
             _write_chunk(root / "valid.npz", [4])
             _write_chunk(root / "test.npz", [2])
+            np.savez(
+                root / "meta.npz",
+                status="complete",
+                published=True,
+                n_samples_train=2,
+                n_samples_valid=1,
+                n_samples_test=1,
+                example_count=4,
+            )
 
             config = {
                 "dataset": {"root": str(root)},
@@ -224,6 +233,15 @@ class CollateAndMaskTest(unittest.TestCase):
             _write_token_chunk(root / "train_000.npz", [[6, 1, 7], [6, 2, 5, 7]])
             _write_token_chunk(root / "valid.npz", [[6, 3, 7]])
             _write_token_chunk(root / "test.npz", [[6, 1, 7]])
+            np.savez(
+                root / "meta.npz",
+                status="complete",
+                published=True,
+                n_samples_train=2,
+                n_samples_valid=1,
+                n_samples_test=1,
+                example_count=4,
+            )
 
             config = {
                 "dataset": {"root": str(root), "metadata_file": "meta.npz"},

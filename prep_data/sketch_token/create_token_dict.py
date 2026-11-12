@@ -14,7 +14,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
-from sklearn.cluster import MiniBatchKMeans
 
 from utils.paths import DEFAULT_SKETCH_TOKEN_DIR, DEFAULT_STROKE5_DIR
 
@@ -27,6 +26,7 @@ def build_codebook(
     random_state: int = 42,
 ) -> np.ndarray:
     """Cluster (Δx, Δy) pairs from stroke-5 arrays into K centroids."""
+    from sklearn.cluster import MiniBatchKMeans
     drawing_deltas: list[np.ndarray] = []
 
     for s5 in stroke5_arrays:

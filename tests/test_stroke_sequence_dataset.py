@@ -36,7 +36,16 @@ class StrokeSequenceDatasetTest(unittest.TestCase):
             _write_chunk(root / "train_000.npz", [3, 5])
             _write_chunk(root / "valid.npz", [4])
             _write_chunk(root / "test.npz", [2])
-            np.savez(root / "meta.npz", n_classes=1)
+            np.savez(
+                root / "meta.npz",
+                status="complete",
+                published=True,
+                n_classes=1,
+                n_samples_train=2,
+                n_samples_valid=1,
+                n_samples_test=1,
+                example_count=4,
+            )
 
             dataset = StrokeSequenceDataset(root, split="train")
 
@@ -51,6 +60,13 @@ class StrokeSequenceDatasetTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _write_token_chunk(root / "train_000.npz", [[1002, 1, 1003], [1002, 2, 1001, 1003]])
+            np.savez(
+                root / "meta.npz",
+                status="complete",
+                published=True,
+                n_samples_train=2,
+                example_count=2,
+            )
 
             dataset = StrokeSequenceDataset(
                 root,
@@ -66,8 +82,10 @@ class StrokeSequenceDatasetTest(unittest.TestCase):
 
     def test_raises_for_missing_split_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            np.savez(root / "meta.npz", status="complete", published=True, n_samples_train=2)
             with self.assertRaises(FileNotFoundError):
-                StrokeSequenceDataset(Path(tmp), split="train")
+                StrokeSequenceDataset(root, split="train")
 
 
 if __name__ == "__main__":

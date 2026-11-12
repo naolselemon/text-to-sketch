@@ -110,14 +110,47 @@ def run_pipeline(
     fail_on_overlength: bool = False,
     extractor_name: str | None = None,
     num_workers: int = 1,
+    accepted_ids: list[str] | str | None = None,
 ) -> None:
     """Run the default centerline preprocessing path or legacy contour path."""
 
-    all_sketches = sorted(Path(sketches_dir).rglob("*.png"))
-    if not all_sketches:
-        raise FileNotFoundError(
-            f"No sketches found in {sketches_dir}. Run the filter-sketches command first."
-        )
+    if accepted_ids is not None:
+        if isinstance(accepted_ids, str):
+            accepted_path = Path(accepted_ids)
+            if accepted_path.is_file():
+                raw_ids = [line.strip() for line in accepted_path.read_text(encoding="utf-8").splitlines() if line.strip() and not line.strip().startswith("#")]
+            else:
+                raw_ids = [item.strip() for item in accepted_ids.split(",") if item.strip()]
+        else:
+            raw_ids = list(accepted_ids)
+
+        seen_acc: set[str] = set()
+        for aid in raw_ids:
+            if aid in seen_acc:
+                raise ValueError(f"Duplicate sample ID in accepted-ids: {aid!r}")
+            seen_acc.add(aid)
+
+        matched_samples: list[Path] = []
+        for aid in raw_ids:
+            candidate = Path(sketches_dir) / f"{aid}.png"
+            if not candidate.is_file():
+                matches = list(Path(sketches_dir).rglob(f"{aid}.png"))
+                if matches:
+                    candidate = matches[0]
+                else:
+                    raise FileNotFoundError(f"Missing sketch file for accepted ID {aid!r} in {sketches_dir}")
+            matched_samples.append(candidate)
+        all_sketches = matched_samples
+        samples = matched_samples
+    else:
+        all_sketches = sorted(Path(sketches_dir).rglob("*.png"))
+        if not all_sketches:
+            raise FileNotFoundError(
+                f"No sketches found in {sketches_dir}. Run the filter-sketches command first."
+            )
+        count = min(int(n_sketches), len(all_sketches))
+        samples = random.Random(seed).sample(all_sketches, count)
+
     if ordering not in _ORDER_FN_MAP:
         valid = ", ".join(sorted(_ORDER_FN_MAP))
         raise ValueError(f"Unknown ordering {ordering!r}. Expected one of: {valid}.")
@@ -130,8 +163,6 @@ def run_pipeline(
     if vectorizer != "centerline" and int(num_workers) != 1:
         raise ValueError("num_workers greater than 1 is only supported for centerline")
 
-    count = min(int(n_sketches), len(all_sketches))
-    samples = random.Random(seed).sample(all_sketches, count)
     if vectorizer == "centerline":
         _run_centerline_pipeline(
             samples=samples,

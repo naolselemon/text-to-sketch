@@ -123,6 +123,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="JSONL audit manifest path.",
     )
     parser.add_argument(
+        "--accepted-ids",
+        type=str,
+        default=None,
+        help="Path to an accepted-IDs file or comma-separated list of sketch IDs.",
+    )
+    parser.add_argument(
         "--fail-on-overlength",
         action="store_true",
         help="Exit unsuccessfully after writing the manifest if any sketch is overlength.",
@@ -220,6 +226,10 @@ def main(argv: list[str] | None = None) -> None:
         f"using {args.num_workers} worker(s)."
     )
 
+    kwargs = {}
+    if args.accepted_ids is not None:
+        kwargs["accepted_ids"] = args.accepted_ids
+
     run_pipeline(
         sketches_dir=sketches_dir,
         stroke5_dir=stroke5_dir,
@@ -238,6 +248,7 @@ def main(argv: list[str] | None = None) -> None:
         fail_on_overlength=args.fail_on_overlength,
         extractor_name=args.extractor_name,
         num_workers=args.num_workers,
+        **kwargs,
     )
 
     print(f"\n{'═' * 58}")

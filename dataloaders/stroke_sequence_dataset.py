@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -46,9 +47,11 @@ class StrokeSequenceDataset(Dataset):
         self.max_cached_files = max(0, int(max_cached_files))
         self._cache: OrderedDict[Path, dict[str, np.ndarray]] = OrderedDict()
 
+        self.metadata = self._load_metadata()
+        self._verify_publication()
         self.files = self._resolve_files(train_pattern, valid_file, test_file)
         self.index = self._build_index()
-        self.metadata = self._load_metadata()
+        self._verify_example_counts()
 
     def __len__(self) -> int:
         return len(self.index)
@@ -95,6 +98,9 @@ class StrokeSequenceDataset(Dataset):
 
         files = [path for path in files if path.exists()]
         if not files:
+            split_key = f"n_samples_{self.split}"
+            if self.metadata.get(split_key) == 0:
+                return []
             raise FileNotFoundError(f"No {self.split} files found under {self.root}")
         return files
 
@@ -118,20 +124,71 @@ class StrokeSequenceDataset(Dataset):
                     )
                 )
         if not index:
+            split_key = f"n_samples_{self.split}"
+            if self.metadata.get(split_key) == 0:
+                return index
             raise ValueError(f"Split {self.split} is empty under {self.root}")
         return index
 
     def _load_metadata(self) -> dict[str, Any]:
         meta_path = self.root / self.metadata_file
-        if not meta_path.exists():
-            return {}
+        if meta_path.exists():
+            metadata: dict[str, Any] = {}
+            with np.load(meta_path, allow_pickle=True) as data:
+                for key in data.files:
+                    value = data[key]
+                    metadata[key] = value.item() if value.shape == () else value
+            return metadata
 
-        metadata: dict[str, Any] = {}
-        with np.load(meta_path, allow_pickle=True) as data:
-            for key in data.files:
-                value = data[key]
-                metadata[key] = value.item() if value.shape == () else value
-        return metadata
+        json_path = self.root / "meta.json"
+        if json_path.exists():
+            with open(json_path, "r", encoding="utf-8") as fh:
+                return json.load(fh)
+
+        raise FileNotFoundError(
+            f"Dataset metadata file '{self.metadata_file}' (or meta.json) not found in {self.root}. "
+            "Build is incomplete or unverified."
+        )
+
+    def _verify_publication(self) -> None:
+        published = bool(self.metadata.get("published", False))
+        status = str(self.metadata.get("status", "")).lower()
+        if not published and status != "complete":
+            raise RuntimeError(
+                f"Dataset at {self.root} is missing a valid publication record "
+                f"(published=True, status='complete') in {self.metadata_file}. "
+                "Refusing to load unverified or interrupted dataset build."
+            )
+
+    def _verify_example_counts(self) -> None:
+        expected_count: int | None = None
+        split_key = f"n_samples_{self.split}"
+        if split_key in self.metadata:
+            expected_count = int(self.metadata[split_key])
+        elif f"example_count_{self.split}" in self.metadata:
+            expected_count = int(self.metadata[f"example_count_{self.split}"])
+        elif "split_counts" in self.metadata:
+            split_counts = self.metadata["split_counts"]
+            if isinstance(split_counts, str):
+                split_counts = json.loads(split_counts)
+            if isinstance(split_counts, dict) and self.split in split_counts:
+                expected_count = int(split_counts[self.split])
+        elif "example_count" in self.metadata:
+            expected_count = int(self.metadata["example_count"])
+        elif "total_count" in self.metadata:
+            expected_count = int(self.metadata["total_count"])
+
+        if expected_count is not None:
+            actual_count = len(self.index)
+            if actual_count != expected_count:
+                raise AssertionError(
+                    f"Example count mismatch in {self.root} for split '{self.split}': "
+                    f"loaded {actual_count} items from chunks, but metadata recorded {expected_count}."
+                )
+        else:
+            raise AssertionError(
+                f"Dataset metadata in {self.root} is missing example count confirmation (e.g. {split_key} or example_count)."
+            )
 
     def _load_chunk(self, file_path: Path) -> dict[str, np.ndarray]:
         if self.max_cached_files == 0:
