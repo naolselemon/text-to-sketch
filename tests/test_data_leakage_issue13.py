@@ -174,18 +174,19 @@ class DataLeakageIssue13Test(unittest.TestCase):
             "--build-id", "build_2",
         ])
 
-        self.assertTrue((target_dir / "train_002.npz").exists())
-        self.assertTrue((target_dir / "train_003.npz").exists())
+        self.assertTrue((target_dir / "train_000_build_1.npz").exists())
+        self.assertTrue((target_dir / "train_002_build_1.npz").exists())
+        self.assertTrue((target_dir / "train_003_build_1.npz").exists())
 
         ds2 = StrokeSequenceDataset(target_dir, split="train")
         self.assertEqual(len(ds2), 4)
         self.assertEqual(len(ds2.files), 2)
-        self.assertEqual([f.name for f in ds2.files], ["train_000.npz", "train_001.npz"])
+        self.assertEqual([f.name for f in ds2.files], ["train_000_build_2.npz", "train_001_build_2.npz"])
 
         prev_snapshot = target_dir / "versions" / "build_1"
         self.assertTrue(prev_snapshot.is_dir())
         self.assertTrue((prev_snapshot / "meta.npz").is_file())
-        self.assertTrue((prev_snapshot / "train_003.npz").is_file())
+        self.assertTrue((prev_snapshot / "train_003_build_1.npz").is_file())
 
     def test_duplicate_drawing_ids_in_manifest_raises_value_error(self) -> None:
         """Scenario 3: Duplicate IDs in manifest must fail fast."""
@@ -364,6 +365,192 @@ class DataLeakageIssue13Test(unittest.TestCase):
         self.assertEqual(user_readme.read_text(encoding="utf-8"), "My custom notes")
         self.assertTrue(user_code.is_file())
         self.assertEqual(user_code.read_text(encoding="utf-8"), "print('hello')")
+
+    def test_preprocessing_manifest_discovered_automatically(self) -> None:
+        """Finding 1: preprocessing_manifest.jsonl discovered automatically in tokens parent dir."""
+        pipeline_output = self.root / "pipeline_run"
+        tokens_dir = pipeline_output / "tokens"
+        tokens_dir.mkdir(parents=True, exist_ok=True)
+        target_dir = self.root / "chunks_auto_manifest"
+
+        fpath = tokens_dir / "sample_auto.npz"
+        save_token_sequence(self._make_valid_tokens(8), fpath, build_id="auto_build_1", token_dict_sha256=self.codebook_sha256, sample_id="sample_auto")
+
+        # preprocessing_manifest.jsonl written in pipeline_output (parent of tokens_dir)
+        manifest_path = pipeline_output / "preprocessing_manifest.jsonl"
+        manifest_path.write_text(
+            json.dumps({
+                "sample_id": "sample_auto",
+                "status": "accepted",
+                "build_id": "auto_build_1",
+                "tokens_sha256": hashlib.sha256(fpath.read_bytes()).hexdigest(),
+                "token_dict_sha256": self.codebook_sha256,
+            }) + "\n",
+            encoding="utf-8",
+        )
+
+        # Run without --manifest argument
+        ret = prepare_tokens_main([
+            "--tokens-dir", str(tokens_dir),
+            "--token-dict-dir", str(self.token_dict_dir),
+            "--target-dir", str(target_dir),
+            "--n-chunks", "1",
+            "--train-frac", "1.0",
+            "--valid-frac", "0.0",
+            "--test-frac", "0.0",
+        ])
+        self.assertEqual(ret, 0)
+        ds = StrokeSequenceDataset(target_dir, split="train")
+        self.assertEqual(len(ds), 1)
+        self.assertEqual(ds[0]["sample_id"], "sample_auto")
+
+    def test_rejects_manifest_with_multiple_distinct_build_ids(self) -> None:
+        """Finding 2: Manifest containing multiple distinct build IDs among accepted samples is rejected."""
+        tokens_dir = self.root / "tokens_multi_build"
+        tokens_dir.mkdir(parents=True, exist_ok=True)
+        target_dir = self.root / "chunks_multi_build"
+
+        fpath1 = tokens_dir / "s1.npz"
+        fpath2 = tokens_dir / "s2.npz"
+        save_token_sequence(self._make_valid_tokens(8), fpath1, build_id="build_A", token_dict_sha256=self.codebook_sha256, sample_id="s1")
+        save_token_sequence(self._make_valid_tokens(8), fpath2, build_id="build_B", token_dict_sha256=self.codebook_sha256, sample_id="s2")
+
+        manifest_path = tokens_dir / "manifest.jsonl"
+        records = [
+            {
+                "sample_id": "s1",
+                "status": "accepted",
+                "build_id": "build_A",
+                "tokens_sha256": hashlib.sha256(fpath1.read_bytes()).hexdigest(),
+                "token_dict_sha256": self.codebook_sha256,
+            },
+            {
+                "sample_id": "s2",
+                "status": "accepted",
+                "build_id": "build_B",
+                "tokens_sha256": hashlib.sha256(fpath2.read_bytes()).hexdigest(),
+                "token_dict_sha256": self.codebook_sha256,
+            },
+        ]
+        with manifest_path.open("w", encoding="utf-8") as f:
+            for r in records:
+                f.write(json.dumps(r) + "\n")
+
+        with self.assertRaisesRegex(ValueError, "Multiple distinct build IDs detected among accepted records in manifest"):
+            prepare_tokens_main([
+                "--tokens-dir", str(tokens_dir),
+                "--token-dict-dir", str(self.token_dict_dir),
+                "--target-dir", str(target_dir),
+            ])
+
+    def test_rejects_manifest_with_build_id_mismatching_cli(self) -> None:
+        """Finding 2: Manifest record build ID mismatch with explicit --build-id CLI argument is rejected."""
+        tokens_dir = self.root / "tokens_cli_mismatch"
+        tokens_dir.mkdir(parents=True, exist_ok=True)
+        target_dir = self.root / "chunks_cli_mismatch"
+
+        fpath = tokens_dir / "s1.npz"
+        save_token_sequence(self._make_valid_tokens(8), fpath, build_id="build_A", token_dict_sha256=self.codebook_sha256, sample_id="s1")
+
+        manifest_path = tokens_dir / "manifest.jsonl"
+        manifest_path.write_text(
+            json.dumps({
+                "sample_id": "s1",
+                "status": "accepted",
+                "build_id": "build_A",
+                "tokens_sha256": hashlib.sha256(fpath.read_bytes()).hexdigest(),
+                "token_dict_sha256": self.codebook_sha256,
+            }) + "\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(ValueError, "Build ID mismatch for accepted sample 's1'"):
+            prepare_tokens_main([
+                "--tokens-dir", str(tokens_dir),
+                "--token-dict-dir", str(self.token_dict_dir),
+                "--target-dir", str(target_dir),
+                "--build-id", "build_EXPECTED",
+            ])
+
+    def test_rebuild_keeps_active_chunks_immutable_until_meta_swap(self) -> None:
+        """Finding 3: Active published chunks are never overwritten in-place before meta.npz is swapped."""
+        tokens_dir = self.root / "tokens_immutable"
+        tokens_dir.mkdir(parents=True, exist_ok=True)
+        target_dir = self.root / "chunks_immutable"
+
+        fpath1 = tokens_dir / "s1.npz"
+        save_token_sequence(self._make_valid_tokens(8), fpath1, build_id="build_1", token_dict_sha256=self.codebook_sha256, sample_id="s1")
+
+        manifest_path = tokens_dir / "manifest.jsonl"
+        manifest_path.write_text(
+            json.dumps({
+                "sample_id": "s1",
+                "status": "accepted",
+                "build_id": "build_1",
+                "tokens_sha256": hashlib.sha256(fpath1.read_bytes()).hexdigest(),
+                "token_dict_sha256": self.codebook_sha256,
+            }) + "\n",
+            encoding="utf-8",
+        )
+
+        # Build 1
+        prepare_tokens_main([
+            "--tokens-dir", str(tokens_dir),
+            "--token-dict-dir", str(self.token_dict_dir),
+            "--target-dir", str(target_dir),
+            "--n-chunks", "1",
+            "--train-frac", "1.0",
+            "--valid-frac", "0.0",
+            "--test-frac", "0.0",
+            "--build-id", "build_1",
+        ])
+
+        chunk_b1 = target_dir / "train_000_build_1.npz"
+        self.assertTrue(chunk_b1.is_file())
+        b1_content = chunk_b1.read_bytes()
+
+        # Build 2 with different sample
+        fpath2 = tokens_dir / "s2.npz"
+        save_token_sequence(self._make_valid_tokens(14), fpath2, build_id="build_2", token_dict_sha256=self.codebook_sha256, sample_id="s2")
+        manifest_path.write_text(
+            json.dumps({
+                "sample_id": "s2",
+                "status": "accepted",
+                "build_id": "build_2",
+                "tokens_sha256": hashlib.sha256(fpath2.read_bytes()).hexdigest(),
+                "token_dict_sha256": self.codebook_sha256,
+            }) + "\n" +
+            json.dumps({
+                "sample_id": "s1",
+                "status": "rejected",
+                "build_id": "build_2",
+            }) + "\n",
+            encoding="utf-8",
+        )
+
+        prepare_tokens_main([
+            "--tokens-dir", str(tokens_dir),
+            "--token-dict-dir", str(self.token_dict_dir),
+            "--target-dir", str(target_dir),
+            "--n-chunks", "1",
+            "--train-frac", "1.0",
+            "--valid-frac", "0.0",
+            "--test-frac", "0.0",
+            "--build-id", "build_2",
+        ])
+
+        # Verify build_1 chunk was never overwritten in-place
+        self.assertTrue(chunk_b1.is_file())
+        self.assertEqual(chunk_b1.read_bytes(), b1_content)
+
+        # Verify build_2 chunk is present under build-specific filename
+        chunk_b2 = target_dir / "train_000_build_2.npz"
+        self.assertTrue(chunk_b2.is_file())
+
+        # Verify active dataset now references build_2
+        ds = StrokeSequenceDataset(target_dir, split="train")
+        self.assertEqual([f.name for f in ds.files], ["train_000_build_2.npz"])
+        self.assertEqual(ds[0]["sample_id"], "s2")
 
 
 if __name__ == "__main__":

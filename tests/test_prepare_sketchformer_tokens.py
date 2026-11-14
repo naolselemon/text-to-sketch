@@ -96,6 +96,19 @@ class PrepareSketchformerTokensTest(unittest.TestCase):
             found = discover_manifest(tokens_dir)
             self.assertEqual(found, manifest)
 
+    def test_discover_manifest_finds_preprocessing_manifest(self) -> None:
+        from prep_data.prepare_sketchformer_tokens import discover_manifest
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            tokens_dir = tmp_path / "tokens"
+            tokens_dir.mkdir()
+            manifest = tmp_path / "preprocessing_manifest.jsonl"
+            manifest.write_text("{}", encoding="utf-8")
+
+            found = discover_manifest(tokens_dir)
+            self.assertEqual(found, manifest)
+
     def test_load_manifest_records_parses_jsonl_and_detects_duplicates(self) -> None:
         import json
         from prep_data.prepare_sketchformer_tokens import load_manifest_records

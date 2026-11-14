@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import uuid
 from datetime import datetime, timezone
@@ -104,7 +105,8 @@ def _snapshot_previous_build(target_path: Path) -> None:
     if not prev_build_id:
         prev_build_id = f"prev_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
 
-    versions_dir = target_path / "versions" / prev_build_id
+    safe_prev_id = re.sub(r"[^a-zA-Z0-9_.-]", "_", prev_build_id)
+    versions_dir = target_path / "versions" / safe_prev_id
     versions_dir.mkdir(parents=True, exist_ok=True)
 
     shutil.copy2(meta_path, versions_dir / "meta.npz")
@@ -115,15 +117,15 @@ def _snapshot_previous_build(target_path: Path) -> None:
     if not chunk_names:
         for p in target_path.glob("train_*.npz"):
             chunk_names.add(p.name)
-        if (target_path / "valid.npz").is_file():
-            chunk_names.add("valid.npz")
-        if (target_path / "test.npz").is_file():
-            chunk_names.add("test.npz")
+        for p in target_path.glob("valid*.npz"):
+            chunk_names.add(p.name)
+        for p in target_path.glob("test*.npz"):
+            chunk_names.add(p.name)
 
     for name in chunk_names:
         src = target_path / name
         if src.is_file():
-            shutil.copy2(src, versions_dir / name)
+            shutil.copy2(src, versions_dir / Path(name).name)
 
 
 def discover_manifest(source_path: Path, manifest_arg: str | Path | None = None) -> Path | None:
@@ -133,6 +135,10 @@ def discover_manifest(source_path: Path, manifest_arg: str | Path | None = None)
             raise FileNotFoundError(f"Specified manifest file not found: {p}")
         return p
     candidates = [
+        source_path / "preprocessing_manifest.jsonl",
+        source_path.parent / "preprocessing_manifest.jsonl",
+        source_path / "preprocessing_manifest.json",
+        source_path.parent / "preprocessing_manifest.json",
         source_path / "manifest.jsonl",
         source_path.parent / "manifest.jsonl",
         source_path / "manifest.json",
@@ -290,7 +296,35 @@ def main(argv: list[str] | None = None) -> int:
 
     disk_files = sorted(source_path.rglob("*.npz")) if source_path.exists() else []
 
+    accepted_build_ids: set[str] = set()
     if manifest_records is not None:
+        for r in manifest_records:
+            status = r.get("status")
+            is_accepted = (status == "accepted") or (r.get("accepted") is True)
+            if is_accepted:
+                bid = r.get("build_id")
+                if bid is not None and str(bid).strip():
+                    accepted_build_ids.add(str(bid).strip())
+
+        if len(accepted_build_ids) > 1:
+            raise ValueError(
+                f"Multiple distinct build IDs detected among accepted records in manifest: "
+                f"{sorted(accepted_build_ids)}. All accepted records must share a single consistent build_id."
+            )
+
+        if args.build_id:
+            for r in manifest_records:
+                status = r.get("status")
+                is_accepted = (status == "accepted") or (r.get("accepted") is True)
+                if is_accepted:
+                    bid = r.get("build_id")
+                    if bid is not None and str(bid).strip() and str(bid).strip() != str(args.build_id):
+                        sid = r.get("sample_id") or r.get("drawing_id") or r.get("id")
+                        raise ValueError(
+                            f"Build ID mismatch for accepted sample '{sid}': "
+                            f"manifest recorded '{bid}', expected '{args.build_id}'"
+                        )
+
         manifest_by_id: dict[str, dict[str, Any]] = {}
         for r in manifest_records:
             sid = r.get("sample_id") or r.get("drawing_id") or r.get("id")
@@ -444,15 +478,13 @@ def main(argv: list[str] | None = None) -> int:
     test_labels = [0] * len(test_tokens)
 
     resolved_build_id = args.build_id
-    if not resolved_build_id and manifest_records:
-        for r in manifest_records:
-            if r.get("build_id"):
-                resolved_build_id = str(r["build_id"])
-                break
+    if not resolved_build_id and accepted_build_ids:
+        resolved_build_id = next(iter(accepted_build_ids))
     if not resolved_build_id:
         resolved_build_id = f"build_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
 
-    staging_dir = target_path / f".staging_{resolved_build_id}"
+    safe_build_id = re.sub(r"[^a-zA-Z0-9_.-]", "_", resolved_build_id)
+    staging_dir = target_path / f".staging_{safe_build_id}"
     staging_dir.mkdir(parents=True, exist_ok=True)
     try:
         train_chunks = chunk_sketch_data(
@@ -465,7 +497,7 @@ def main(argv: list[str] | None = None) -> int:
         for chunk_idx, (chunk_records, chunk_labels) in enumerate(train_chunks):
             chunk_tokens = [tokens for tokens, _ in chunk_records]
             chunk_ids = [sample_id for _, sample_id in chunk_records]
-            chunk_name = f"train_{chunk_idx:03}.npz"
+            chunk_name = f"train_{chunk_idx:03}_{safe_build_id}.npz"
             train_chunk_names.append(chunk_name)
             train_chunk_counts.append(len(chunk_tokens))
             save_chunk(
@@ -475,11 +507,23 @@ def main(argv: list[str] | None = None) -> int:
                 chunk_ids,
             )
 
-        save_chunk(staging_dir / "valid.npz", valid_tokens, valid_labels, valid_ids)
-        save_chunk(staging_dir / "test.npz", test_tokens, test_labels, test_ids)
+        valid_chunk_name = f"valid_{safe_build_id}.npz"
+        test_chunk_name = f"test_{safe_build_id}.npz"
+        save_chunk(staging_dir / valid_chunk_name, valid_tokens, valid_labels, valid_ids)
+        save_chunk(staging_dir / test_chunk_name, test_tokens, test_labels, test_ids)
 
         for chunk_name, expected_count in zip(train_chunk_names, train_chunk_counts):
             staged_file = staging_dir / chunk_name
+            if not staged_file.is_file():
+                raise RuntimeError(f"Failed to generate staged chunk: {staged_file}")
+            with np.load(staged_file, allow_pickle=True) as check_data:
+                if len(check_data["x"]) != expected_count:
+                    raise RuntimeError(
+                        f"Staged chunk count mismatch in {staged_file}: expected {expected_count}, got {len(check_data['x'])}"
+                    )
+
+        for name, expected_count in [(valid_chunk_name, len(valid_tokens)), (test_chunk_name, len(test_tokens))]:
+            staged_file = staging_dir / name
             if not staged_file.is_file():
                 raise RuntimeError(f"Failed to generate staged chunk: {staged_file}")
             with np.load(staged_file, allow_pickle=True) as check_data:
@@ -496,7 +540,7 @@ def main(argv: list[str] | None = None) -> int:
                 dest = target_path / staged_file.name
                 os.replace(staged_file, dest)
 
-        temp_meta = target_path / f".meta_{resolved_build_id}.tmp.npz"
+        temp_meta = target_path / f".meta_{safe_build_id}.tmp.npz"
         np.savez(
             temp_meta,
             is_published=True,
@@ -504,9 +548,9 @@ def main(argv: list[str] | None = None) -> int:
             dictionary_fingerprint=current_dict_fingerprint or "",
             train_chunks=np.asarray(train_chunk_names, dtype=object),
             train_chunk_counts=np.asarray(train_chunk_counts, dtype=np.int32),
-            valid_chunks=np.asarray(["valid.npz"], dtype=object),
+            valid_chunks=np.asarray([valid_chunk_name], dtype=object),
             valid_chunk_counts=np.asarray([len(valid_tokens)], dtype=np.int32),
-            test_chunks=np.asarray(["test.npz"], dtype=object),
+            test_chunks=np.asarray([test_chunk_name], dtype=object),
             test_chunk_counts=np.asarray([len(test_tokens)], dtype=np.int32),
             format="tok_dict",
             codebook_size=codebook_size,
@@ -530,6 +574,15 @@ def main(argv: list[str] | None = None) -> int:
         )
         os.replace(temp_meta, target_path / "meta.npz")
 
+        # Copy valid and test chunks as valid.npz and test.npz for backwards compatibility with unconfigured tools
+        try:
+            shutil.copy2(target_path / valid_chunk_name, target_path / f".valid_{safe_build_id}.tmp.npz")
+            os.replace(target_path / f".valid_{safe_build_id}.tmp.npz", target_path / "valid.npz")
+            shutil.copy2(target_path / test_chunk_name, target_path / f".test_{safe_build_id}.tmp.npz")
+            os.replace(target_path / f".test_{safe_build_id}.tmp.npz", target_path / "test.npz")
+        except Exception:
+            pass
+
         report = {
             "schema_version": 2,
             "build_id": resolved_build_id,
@@ -548,9 +601,11 @@ def main(argv: list[str] | None = None) -> int:
             },
             "train_chunks": train_chunk_names,
             "train_chunk_counts": train_chunk_counts,
+            "valid_chunks": [valid_chunk_name],
+            "test_chunks": [test_chunk_name],
             "dictionary_fingerprint": current_dict_fingerprint,
         }
-        temp_report = target_path / f".report_{resolved_build_id}.tmp.json"
+        temp_report = target_path / f".report_{safe_build_id}.tmp.json"
         temp_report.write_text(
             json.dumps(report, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
