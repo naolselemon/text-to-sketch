@@ -1,20 +1,24 @@
 # Contributing
 
-Thank you for contributing to Text-to-Sketch. All contributions must be made
-from a personal fork and submitted to the upstream repository's `dev` branch.
-Do not open feature or bug-fix pull requests against `main`.
+Submit contributions through `naolselemon/text-to-sketch`, a fork of
+`Long-form-AI-video-generation/text-to-sketch`. Fork the former into your own
+account and open pull requests against its `dev` branch. The maintainer
+forwards accepted work to the organization separately. Do not target `main`
+or open these pull requests against the organization repository.
 
 ## 1. Fork and clone the repository
 
-Create a fork on GitHub, then clone your fork. Replace `<your-username>` with
-your GitHub username.
+On GitHub, open [naolselemon/text-to-sketch](https://github.com/naolselemon/text-to-sketch),
+click **Fork**, and select your account. Clone your new fork, replacing
+`<your-username>` with your GitHub username:
 
 ```bash
 git clone git@github.com:<your-username>/text-to-sketch.git
 cd text-to-sketch
 ```
 
-Your fork should be named `origin`. Add the main repository as `upstream`:
+Your fork should be named `origin`. Add the repository accepting your pull
+requests as `upstream`:
 
 ```bash
 git remote add upstream \
@@ -107,7 +111,7 @@ branch such as `dev` or `main`.
 
 On GitHub, create a pull request with:
 
-- **base repository:** `Long-form-AI-video-generation/text-to-sketch`
+- **base repository:** `naolselemon/text-to-sketch`
 - **base branch:** `dev`
 - **head repository:** your fork
 - **compare branch:** your feature or fix branch

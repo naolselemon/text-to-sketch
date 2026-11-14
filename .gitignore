@@ -20,3 +20,4 @@ weights/*
 docs
 weights/finetuned/
 weights/pretrained/
+study/
