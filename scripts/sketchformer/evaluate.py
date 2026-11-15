@@ -92,6 +92,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Require a non-empty 2049-4096 bucket with median geometry F1 >= 0.90.",
     )
+    parser.add_argument(
+        "--allow-unverified-checkpoint",
+        action="store_true",
+        help="Allow evaluating legacy checkpoints without dataset lineage metadata.",
+    )
+    parser.add_argument(
+        "--allow-random-weights",
+        action="store_true",
+        help="Allow evaluating randomly initialized weights without a checkpoint (for testing/debug only).",
+    )
     return parser.parse_args()
 
 
@@ -172,23 +182,73 @@ def main() -> int:
     if args.enforce_long_sequence_gates and args.decode_mode != "free-running":
         raise ValueError("--enforce-long-sequence-gates requires --decode-mode free-running")
     config = compose_training_config(args.config, experiment=args.experiment)
+    if not args.checkpoint and not args.allow_random_weights:
+        raise ValueError(
+            "Evaluation requires a trained model checkpoint via --checkpoint. "
+            "To evaluate uninitialized random weights for testing/debugging, pass --allow-random-weights."
+        )
+
     if args.data_root:
         config["data"]["dataset"]["root"] = args.data_root
     if args.precision:
         config.setdefault("trainer", {}).setdefault("runtime", {})["precision"] = args.precision
 
+    data_root_str = config.get("data", {}).get("dataset", {}).get("root")
+    dataset_lineage = None
+    if data_root_str:
+        resolved_data_root = Path(data_root_str)
+        if not resolved_data_root.is_absolute():
+            resolved_data_root = PROJECT_ROOT / resolved_data_root
+        meta_path = resolved_data_root / "meta.npz"
+        if not meta_path.is_file():
+            if not args.allow_unverified_checkpoint:
+                raise RuntimeError(
+                    f"Dataset metadata not found at {meta_path}. Cannot verify dataset provenance. "
+                    "Pass --allow-unverified-checkpoint to bypass verification for legacy datasets."
+                )
+        else:
+            from dataloaders.lineage import load_dataset_lineage
+
+            dataset_lineage = load_dataset_lineage(
+                resolved_data_root,
+                verify_chunks=True,
+                allow_unverified=args.allow_unverified_checkpoint,
+            )
+
+    load_result = None
+    if args.checkpoint:
+        from core import load_checkpoint_metadata, validate_checkpoint_compatibility
+
+        ckpt_path = PROJECT_ROOT / args.checkpoint
+        ckpt_meta = load_checkpoint_metadata(ckpt_path)
+
+        validate_checkpoint_compatibility(
+            ckpt_meta.get("lineage"),
+            dataset_lineage,
+            checkpoint_config=ckpt_meta.get("config"),
+            active_config=config,
+            split=args.split,
+            allow_unverified=args.allow_unverified_checkpoint,
+        )
+
     device = resolve_device(args.device)
     _configure_torch_runtime(config, device)
     precision = _resolve_precision_runtime(config, device)
-    datamodule = StrokeSequenceDataModule(config["data"], project_root=PROJECT_ROOT)
+    datamodule = StrokeSequenceDataModule(
+        config["data"],
+        project_root=PROJECT_ROOT,
+        lineage=dataset_lineage,
+        allow_unverified=args.allow_unverified_checkpoint,
+    )
     datamodule.setup("test" if args.split == "test" else "fit")
     loader = datamodule.test_dataloader() if args.split == "test" else datamodule.val_dataloader()
 
     raw_model = build_model(config["model"])
     if args.checkpoint:
-        load_checkpoint(PROJECT_ROOT / args.checkpoint, raw_model, strict=False)
+        ckpt_path = PROJECT_ROOT / args.checkpoint
+        load_result = load_checkpoint(ckpt_path, raw_model, strict=False)
     else:
-        print("[warning] evaluating randomly initialized model; pass --checkpoint for trained weights")
+        print("[warning] evaluating randomly initialized model (--allow-random-weights passed)")
     model = maybe_compile_model(raw_model.to(device), config["model"])
 
     loss_fn = build_loss(config["optimizer"]).to(device)
@@ -311,6 +371,7 @@ def main() -> int:
                 "experiment": args.experiment,
                 "split": args.split,
                 "checkpoint": args.checkpoint,
+                "checkpoint_lineage": load_result.lineage if load_result else {},
                 "data_root": config["data"]["dataset"]["root"],
                 "device": str(device),
                 "precision": precision.effective,
