@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import pickle
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
+import numpy as np
+from safetensors import safe_open
 import torch
 from torch import nn
 
@@ -14,7 +22,14 @@ from models.sketchformer.checkpoint_mapping import (
     resize_learned_position_embedding,
     tensorflow_kernel_to_linear_weight,
 )
-from models.sketchformer.pretrained import inspect_tensorflow_checkpoint
+from models.sketchformer.pretrained import (
+    fingerprint_tensorflow_checkpoint,
+    inspect_tensorflow_checkpoint,
+)
+from scripts.sketchformer.convert_checkpoint import (
+    _conversion_identity,
+    main as convert_main,
+)
 
 
 class CheckpointMappingTest(unittest.TestCase):
@@ -119,6 +134,112 @@ class CheckpointMappingTest(unittest.TestCase):
             self.assertEqual(checkpoint.prefix, prefix)
             self.assertTrue(checkpoint.exists)
             self.assertEqual(len(checkpoint.data_files), 1)
+
+
+    def test_tensorflow_fingerprint_changes_with_checkpoint_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            prefix = Path(directory) / "ckpt-1"
+            prefix.with_suffix(".index").write_bytes(b"index")
+            shard = Path(directory) / "ckpt-1.data-00000-of-00001"
+            shard.write_bytes(b"weights")
+            expected = hashlib.sha256(b"indexweights").hexdigest()
+            self.assertEqual(fingerprint_tensorflow_checkpoint(prefix), expected)
+            shard.write_bytes(b"changed")
+            self.assertNotEqual(fingerprint_tensorflow_checkpoint(prefix), expected)
+            shard.unlink()
+            with self.assertRaisesRegex(FileNotFoundError, "Incomplete"):
+                fingerprint_tensorflow_checkpoint(prefix)
+
+    def test_tensorflow_fingerprint_rejects_missing_multishard_data(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            prefix = Path(directory) / "ckpt-1"
+            prefix.with_suffix(".index").write_bytes(b"index")
+            first = Path(directory) / "ckpt-1.data-00000-of-00002"
+            second = Path(directory) / "ckpt-1.data-00001-of-00002"
+            first.write_bytes(b"first")
+            second.write_bytes(b"second")
+            self.assertEqual(
+                fingerprint_tensorflow_checkpoint(prefix),
+                hashlib.sha256(b"indexfirstsecond").hexdigest(),
+            )
+            second.unlink()
+            with self.assertRaisesRegex(FileNotFoundError, "Incomplete"):
+                fingerprint_tensorflow_checkpoint(prefix)
+
+    def test_converter_binds_original_dictionary_and_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            prefix = root / "ckpt-1"
+            prefix.with_suffix(".index").write_bytes(b"index")
+            (root / "ckpt-1.data-00000-of-00001").write_bytes(b"weights")
+            original_centers = np.asarray(
+                [[0.1, 0.2], [0.3, 0.4]], dtype=np.float32
+            )
+            original = root / "token_dict.pkl"
+            with original.open("wb") as stream:
+                pickle.dump(SimpleNamespace(cluster_centers_=original_centers), stream)
+            codebook = root / "codebook.npy"
+            np.save(codebook, original_centers)
+            token_config = {
+                "codebook_size": 2,
+                "motion_token_offset": 1,
+                "pad_token_id": 0,
+                "sep_token_id": 3,
+                "sos_token_id": 4,
+                "eos_token_id": 5,
+                "vocab_size": 6,
+            }
+            model_config = {
+                "name": "test", "input": {
+                    "token_dictionary": token_config, "max_seq_len": 200,
+                },
+            }
+            identity = _conversion_identity(
+                prefix, codebook, original, model_config
+            )
+            self.assertEqual(
+                identity["source_tf_checkpoint_sha256"],
+                fingerprint_tensorflow_checkpoint(prefix),
+            )
+            self.assertEqual(
+                json.loads(identity["token_layout_json"]), token_config
+            )
+
+            report = SimpleNamespace(
+                converted_keys=["weight"], skipped_keys=[],
+                missing_target_keys=[], initialized_keys=[],
+            )
+            output = root / "converted.safetensors"
+            with (
+                patch("scripts.sketchformer.convert_checkpoint.PROJECT_ROOT", root),
+                patch(
+                    "scripts.sketchformer.convert_checkpoint.compose_training_config",
+                    return_value={"model": model_config},
+                ),
+                patch(
+                    "scripts.sketchformer.convert_checkpoint._load_tensorflow_checkpoint",
+                    return_value={},
+                ),
+                patch("scripts.sketchformer.convert_checkpoint.build_model") as build,
+                patch(
+                    "scripts.sketchformer.convert_checkpoint.convert_tok_dict_tensorflow_state",
+                    return_value=({"weight": torch.ones(1)}, report),
+                ),
+                patch.object(sys, "argv", [
+                    "convert_checkpoint", "--source", "ckpt-1",
+                    "--output", "converted.safetensors",
+                    "--codebook-path", "codebook.npy",
+                    "--original-token-dict", "token_dict.pkl",
+                ]),
+            ):
+                build.return_value.state_dict.return_value = {}
+                self.assertEqual(convert_main(), 0)
+            with safe_open(output, framework="pt", device="cpu") as archive:
+                self.assertEqual(archive.metadata(), identity)
+
+            np.save(codebook, original_centers[::-1])
+            with self.assertRaisesRegex(ValueError, "differs from released"):
+                _conversion_identity(prefix, codebook, original, model_config)
 
 
 if __name__ == "__main__":
