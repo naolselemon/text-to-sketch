@@ -83,7 +83,6 @@ class BenchmarkIntegrationTest(unittest.TestCase):
             y=np.zeros(len(x), dtype=np.int64),
             sample_ids=np.array([f"sample-{i}" for i in range(len(x))]),
         )
-        np.savez(self.data / "meta.npz", is_published=True, format="tok_dict")
 
     def run_benchmark(self, name, *extra, success=True):
         env = dict(os.environ)

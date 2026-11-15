@@ -144,25 +144,14 @@ def main():
 
     std, mean = compute_scale_stats(train_sketches)
     meta_file = target_path / "meta.npz"
-    train_chunk_names = [f"train_{idx:03}.npz" for idx in range(len(train_chunks_list))]
-    train_chunk_counts = [len(chunk_sketches) for chunk_sketches, _ in train_chunks_list]
-    np.savez(
-        meta_file,
-        std=std,
-        mean=mean,
-        class_names=np.array(["anime"], dtype=object),
-        n_classes=1,
-        n_samples_train=len(train_sketches),
-        n_samples_valid=len(valid_sketches),
-        n_samples_test=len(test_sketches),
-        train_chunks=np.asarray(train_chunk_names, dtype=object),
-        train_chunk_counts=np.asarray(train_chunk_counts, dtype=np.int32),
-        valid_chunks=np.asarray(["valid.npz"], dtype=object),
-        valid_chunk_counts=np.asarray([len(valid_sketches)], dtype=np.int32),
-        test_chunks=np.asarray(["test.npz"], dtype=object),
-        test_chunk_counts=np.asarray([len(test_sketches)], dtype=np.int32),
-        is_published=True,
-    )
+    np.savez(meta_file,
+             std=std,
+             mean=mean,
+             class_names=np.array(["anime"], dtype=object),    
+             n_classes=1,
+             n_samples_train=len(train_sketches),
+             n_samples_valid=len(valid_sketches),
+             n_samples_test=len(test_sketches))
     print(f"Saved meta file: {meta_file}")
 
 

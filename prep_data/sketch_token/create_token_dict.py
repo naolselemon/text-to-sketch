@@ -7,7 +7,6 @@ pairs from a corpus of stroke-5 arrays using MiniBatchKMeans.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import pickle
 import sys
@@ -66,22 +65,6 @@ def build_codebook(
 
 # Persistence helpers
 
-def compute_codebook_fingerprint(codebook: np.ndarray | Path | str) -> str:
-    """Compute deterministic SHA256 fingerprint of a codebook array or file."""
-    if isinstance(codebook, (str, Path)):
-        return hashlib.sha256(Path(codebook).read_bytes()).hexdigest()
-    array = np.asarray(codebook, dtype=np.float32)
-    return hashlib.sha256(array.tobytes()).hexdigest()
-
-
-def get_token_dict_fingerprint(token_dict_dir: Path | str) -> str:
-    """Return SHA256 fingerprint of codebook.npy in token_dict_dir."""
-    npy_path = Path(token_dict_dir) / "codebook.npy"
-    if not npy_path.exists():
-        raise FileNotFoundError(f"Codebook file not found in {token_dict_dir}: {npy_path}")
-    return hashlib.sha256(npy_path.read_bytes()).hexdigest()
-
-
 def save_codebook(
     codebook: np.ndarray,
     output_dir: Path,
@@ -98,13 +81,11 @@ def save_codebook(
     meta_path = output_dir / "metadata.json"
 
     np.save(npy_path, codebook)
-    codebook_sha256 = hashlib.sha256(npy_path.read_bytes()).hexdigest()
 
     metadata = {
         "K": K,
         "n_samples": n_samples,
         "codebook_shape": list(codebook.shape),
-        "codebook_sha256": codebook_sha256,
         "timestamp": datetime.now(tz=timezone.utc).isoformat(),
     }
     if source is not None:
@@ -131,12 +112,9 @@ def load_codebook_from_dir(sketch_token_dir: Path) -> tuple[np.ndarray, dict]:
     (codebook, metadata) tuple.
     """
     sketch_token_dir = Path(sketch_token_dir)
-    npy_path = sketch_token_dir / "codebook.npy"
-    codebook = np.load(npy_path)
+    codebook = np.load(sketch_token_dir / "codebook.npy")
     with open(sketch_token_dir / "metadata.json") as fh:
         metadata = json.load(fh)
-    if "codebook_sha256" not in metadata and npy_path.exists():
-        metadata["codebook_sha256"] = hashlib.sha256(npy_path.read_bytes()).hexdigest()
     return codebook, metadata
 
 

@@ -224,7 +224,6 @@ class CollateAndMaskTest(unittest.TestCase):
             _write_token_chunk(root / "train_000.npz", [[6, 1, 7], [6, 2, 5, 7]])
             _write_token_chunk(root / "valid.npz", [[6, 3, 7]])
             _write_token_chunk(root / "test.npz", [[6, 1, 7]])
-            np.savez(root / "meta.npz", is_published=True, format="tok_dict")
 
             config = {
                 "dataset": {"root": str(root), "metadata_file": "meta.npz"},
