@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Any
 
 from utils.paths import (
     DEFAULT_FILTERED_SKETCHES_DIR,
@@ -49,7 +50,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--stroke5-dir",
         type=Path,
         default=DEFAULT_STROKE5_DIR,
-        help=f"Output directory for stroke5 .npz files (default: {DEFAULT_STROKE5_DIR}).",
+        help=(
+            "New stroke5 output directory (must not exist). Its sibling tokens/ "
+            "and preprocessing_manifest.jsonl must also be unused; choose a "
+            f"unique build path each run (default: {DEFAULT_STROKE5_DIR})."
+        ),
     )
     parser.add_argument(
         "--sketch-token-dir",
@@ -120,7 +125,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--manifest",
         type=Path,
         default=None,
-        help="JSONL audit manifest path.",
+        help="New JSONL audit manifest path; must not already exist.",
     )
     parser.add_argument(
         "--fail-on-overlength",
@@ -135,6 +140,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Number of centerline sketches to process concurrently. "
             "Use 1 for the existing serial behavior (default: 1)."
         ),
+    )
+    parser.add_argument(
+        "--build-id",
+        default=None,
+        help="Explicit build/run identifier recorded in manifest and token files; use a new ID per run.",
     )
     parser.add_argument(
         "--seed",
@@ -179,6 +189,12 @@ def _prompt_ordering() -> str:
 
 
 def main(argv: list[str] | None = None) -> None:
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(errors="replace")
+        except Exception:
+            pass
+
     args = parse_args(argv)
 
     sketches_dir = args.sketches_dir
@@ -220,25 +236,29 @@ def main(argv: list[str] | None = None) -> None:
         f"using {args.num_workers} worker(s)."
     )
 
-    run_pipeline(
-        sketches_dir=sketches_dir,
-        stroke5_dir=stroke5_dir,
-        sketch_token_dir=sketch_token_dir,
-        n_sketches=n,
-        ordering=ordering,
-        rdp_epsilon=args.rdp_epsilon,
-        codebook_K=args.codebook_k,
-        seed=args.seed,
-        vectorizer=args.vectorizer,
-        threshold_profile=args.threshold_profile,
-        max_token_length=args.max_token_length,
-        max_geometry_error=args.max_geometry_error,
-        token_dict_dir=args.token_dict_dir,
-        manifest_path=args.manifest,
-        fail_on_overlength=args.fail_on_overlength,
-        extractor_name=args.extractor_name,
-        num_workers=args.num_workers,
-    )
+    pipeline_kwargs: dict[str, Any] = {
+        "sketches_dir": sketches_dir,
+        "stroke5_dir": stroke5_dir,
+        "sketch_token_dir": sketch_token_dir,
+        "n_sketches": n,
+        "ordering": ordering,
+        "rdp_epsilon": args.rdp_epsilon,
+        "codebook_K": args.codebook_k,
+        "seed": args.seed,
+        "vectorizer": args.vectorizer,
+        "threshold_profile": args.threshold_profile,
+        "max_token_length": args.max_token_length,
+        "max_geometry_error": args.max_geometry_error,
+        "token_dict_dir": args.token_dict_dir,
+        "manifest_path": args.manifest,
+        "fail_on_overlength": args.fail_on_overlength,
+        "extractor_name": args.extractor_name,
+        "num_workers": args.num_workers,
+    }
+    if getattr(args, "build_id", None) is not None:
+        pipeline_kwargs["build_id"] = args.build_id
+
+    run_pipeline(**pipeline_kwargs)
 
     print(f"\n{'═' * 58}")
     print("  Pipeline complete!")

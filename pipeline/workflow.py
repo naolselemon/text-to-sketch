@@ -10,8 +10,10 @@ import random
 import stat
 import tempfile
 import time
+import uuid
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -77,6 +79,7 @@ class _CenterlineWorkerConfig:
     max_geometry_error: float
     extractor_name: str
     limit_library_threads: bool
+    build_id: str
 
 
 @dataclass
@@ -112,6 +115,7 @@ def run_pipeline(
     fail_on_overlength: bool = False,
     extractor_name: str | None = None,
     num_workers: int = 1,
+    build_id: str | None = None,
 ) -> None:
     """Run the default centerline preprocessing path or legacy contour path."""
 
@@ -149,9 +153,13 @@ def run_pipeline(
             fail_on_overlength=fail_on_overlength,
             extractor_name=extractor_name or Path(sketches_dir).name,
             num_workers=int(num_workers),
+            build_id=build_id,
         )
         return
 
+    _reserve_output_paths(
+        (Path(stroke5_dir), Path(sketch_token_dir), Path(stroke5_dir).parent / "tokens")
+    )
     _run_legacy_pipeline(
         samples=samples,
         stroke5_dir=Path(stroke5_dir),
@@ -178,6 +186,7 @@ def _run_centerline_pipeline(
     fail_on_overlength: bool,
     extractor_name: str,
     num_workers: int,
+    build_id: str | None = None,
 ) -> None:
     if max_token_length < 4:
         raise ValueError("max_token_length must be at least 4")
@@ -195,8 +204,15 @@ def _run_centerline_pipeline(
         raise ValueError(f"Expected codebook shape (K, 2), got {codebook.shape}")
     codebook_sha256 = hashlib.sha256(codebook_path.read_bytes()).hexdigest()
 
+    resolved_build_id = (
+        str(build_id)
+        if build_id
+        else f"build_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+    )
     token_dir = stroke5_dir.parent / "tokens"
     resolved_manifest = manifest_path or stroke5_dir.parent / "preprocessing_manifest.jsonl"
+    _reserve_output_paths((stroke5_dir, token_dir), resolved_manifest)
+
     records: list[dict[str, Any]] = []
     accepted = overlength = failed = 0
     effective_workers = min(
@@ -223,6 +239,7 @@ def _run_centerline_pipeline(
         max_geometry_error=max_geometry_error,
         extractor_name=extractor_name,
         limit_library_threads=effective_workers > 1,
+        build_id=resolved_build_id,
     )
     del codebook
 
@@ -347,6 +364,7 @@ def _process_centerline_sample(image_path: Path) -> dict[str, Any]:
     relative = image_path.relative_to(sketches_dir)
     base_record: dict[str, Any] = {
         "schema_version": 2,
+        "build_id": config.build_id,
         "sample_id": relative.with_suffix("").as_posix(),
         "source_path": str(image_path),
         "source_relative_path": relative.as_posix(),
@@ -374,18 +392,27 @@ def _process_centerline_sample(image_path: Path) -> dict[str, Any]:
         )
         base_record.update(result["record"])
         if not result["accepted"]:
+            base_record["status"] = "rejected"
             return base_record
 
         output_relative = relative.with_suffix(".npz")
         stroke_path = Path(config.stroke5_dir) / output_relative
         token_path = Path(config.token_dir) / output_relative
         save_stroke5(result["stroke5"], stroke_path)
-        save_token_sequence(result["tokens"], token_path)
+        save_token_sequence(
+            result["tokens"],
+            token_path,
+            build_id=config.build_id,
+            token_dict_sha256=config.codebook_sha256,
+            sample_id=base_record["sample_id"],
+        )
+        tokens_sha256 = hashlib.sha256(token_path.read_bytes()).hexdigest()
         base_record.update(
             {
                 "status": "accepted",
                 "stroke5_path": str(stroke_path),
                 "tokens_path": str(token_path),
+                "tokens_sha256": tokens_sha256,
             }
         )
     except Exception as exc:
@@ -548,6 +575,36 @@ def _available_cpu_count() -> int:
         return max(1, len(os.sched_getaffinity(0)))
     except (AttributeError, OSError):
         return max(1, os.cpu_count() or 1)
+
+
+def _reserve_output_paths(directories: tuple[Path, ...], manifest_path: Path | None = None) -> None:
+    """Claim new output locations before processing; interrupted runs remain claimed."""
+    resolved_dirs = tuple(directory.resolve() for directory in directories)
+    for index, directory in enumerate(resolved_dirs):
+        if directory.exists() or directory.is_symlink():
+            raise FileExistsError(f"Pipeline output already exists: {directory}. Choose a new --stroke5-dir.")
+        if any(
+            directory == other or directory in other.parents or other in directory.parents
+            for other in resolved_dirs[index + 1 :]
+        ):
+            raise ValueError("Pipeline output directories must be separate")
+
+    if manifest_path is not None:
+        resolved_manifest = manifest_path.resolve()
+        if any(
+            resolved_manifest == directory or resolved_manifest in directory.parents
+            for directory in resolved_dirs
+        ):
+            raise ValueError("Pipeline manifest path must not be an output directory")
+        if manifest_path.exists() or manifest_path.is_symlink():
+            raise FileExistsError(f"Pipeline manifest already exists: {manifest_path}. Choose a new --manifest.")
+
+    for directory in directories:
+        directory.mkdir(parents=True, exist_ok=False)
+    if manifest_path is not None:
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        with manifest_path.open("x", encoding="utf-8"):
+            pass
 
 
 def _write_manifest(path: Path, records: list[dict[str, Any]]) -> None:

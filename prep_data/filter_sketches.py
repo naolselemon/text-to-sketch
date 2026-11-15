@@ -1,12 +1,12 @@
 """
 Filter sketch images by original image point count.
 
-By default this creates a clean copy of sketches whose original foreground pixel
-count is at or below the configured --max-points threshold. This happens before
-any vectorization/RDP simplification:
+By default this copies sketches whose original foreground pixel count is at or
+below --max-points into a *new* output directory. Choose a different --output-dir
+and --report-path for every run; existing output is never merged or replaced.
+This happens before any vectorization/RDP simplification:
 
-    .venv/bin/python scripts/prepare_data/filter_sketches_by_points.py
-
+    .venv/bin/python scripts/prepare_data/filter_sketches_by_points.py --output-dir data/processed/builds/RUN/sketches_filtered --report-path data/processed/builds/RUN/filter_report.csv
 Use --action move-rejected if you want to clean data/processed/sketches in
 place by moving high-point sketches out of it.
 """
@@ -72,8 +72,9 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=DEFAULT_OUTPUT_DIR,
         help=(
-            "Destination for kept sketches when --action copy-kept is used "
-            f"(default: {DEFAULT_OUTPUT_DIR})."
+            "Destination for kept sketches when --action copy-kept is used; "
+            "must not already exist (use a unique path for each run; "
+            f"default: {DEFAULT_OUTPUT_DIR})."
         ),
     )
     parser.add_argument(
@@ -82,14 +83,15 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_REJECTED_DIR,
         help=(
             "Destination for rejected sketches when --action move-rejected is "
-            f"used (default: {DEFAULT_REJECTED_DIR})."
+            "used; must not already exist "
+            f"(default: {DEFAULT_REJECTED_DIR})."
         ),
     )
     parser.add_argument(
         "--report-path",
         type=Path,
         default=DEFAULT_REPORT_PATH,
-        help=f"CSV report path (default: {DEFAULT_REPORT_PATH}).",
+        help=f"New CSV report path; must not already exist (default: {DEFAULT_REPORT_PATH}).",
     )
     parser.add_argument(
         "--max-points",
@@ -226,7 +228,7 @@ def move_rejected(src: Path, dst: Path) -> None:
 
 def write_report(report_path: Path, results: list[FilterResult]) -> None:
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    with report_path.open("w", newline="", encoding="utf-8") as handle:
+    with report_path.open("x", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(
             handle,
             fieldnames=[
@@ -260,6 +262,21 @@ def filter_sketches(args: argparse.Namespace) -> list[FilterResult]:
     input_dir = args.input_dir.resolve()
     output_dir = args.output_dir.resolve()
     rejected_dir = args.rejected_dir.resolve()
+    report_path = args.report_path.resolve()
+    if report_path.exists():
+        raise FileExistsError(f"Filter report already exists: {report_path}. Choose a new --report-path.")
+    destination = (
+        output_dir if args.action == "copy-kept"
+        else rejected_dir if args.action == "move-rejected"
+        else None
+    )
+    if destination is not None:
+        if destination == input_dir or destination in input_dir.parents or input_dir in destination.parents:
+            raise ValueError("Filter destination must not overlap the input directory")
+        if report_path == destination or report_path in destination.parents:
+            raise ValueError("Filter report path cannot be the output directory or its parent")
+        destination.mkdir(parents=True, exist_ok=False)
+
 
     sketches = collect_sketches(input_dir)
     if args.limit is not None:

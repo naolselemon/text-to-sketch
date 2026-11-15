@@ -111,7 +111,17 @@ def build_manifest(
     if not dataset_root.exists():
         raise FileNotFoundError(f"Dataset root does not exist: {dataset_root}")
 
-    if split == "train":
+    if (dataset_root / "meta.npz").is_file():
+        from dataloaders.stroke_sequence_dataset import StrokeSequenceDataset
+
+        files = StrokeSequenceDataset(
+            dataset_root,
+            split=split,
+            train_pattern=train_pattern,
+            valid_file=valid_file,
+            test_file=test_file,
+        ).files
+    elif split == "train":
         files = sorted(dataset_root.glob(train_pattern))
     elif split == "valid":
         files = [dataset_root / valid_file]

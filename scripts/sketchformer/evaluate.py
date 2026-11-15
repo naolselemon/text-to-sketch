@@ -139,10 +139,32 @@ def _discover_preprocessing_manifest(
     )
     candidates: list[Path] = []
     report_path = dataset_root / "preparation_report.json"
+    expected_build_id: str | None = None
+    meta_path = dataset_root / "meta.npz"
+    if meta_path.is_file():
+        with np.load(meta_path, allow_pickle=True) as metadata:
+            if "report_file" in metadata:
+                report_path = dataset_root / str(metadata["report_file"])
+                expected_build_id = str(metadata["build_id"])
+                if not report_path.is_file():
+                    raise FileNotFoundError(
+                        f"Published preparation report does not exist: {report_path}"
+                    )
     if report_path.is_file():
         import json
 
         report = json.loads(report_path.read_text(encoding="utf-8"))
+        if expected_build_id is not None and report.get("build_id") != expected_build_id:
+            raise ValueError(
+                f"Preparation report build ID differs from active dataset: {report_path}"
+            )
+        if report.get("manifest_path"):
+            manifest_path = _resolve_project_path(str(report["manifest_path"]))
+            if not manifest_path.is_file():
+                raise FileNotFoundError(
+                    f"Published preprocessing manifest does not exist: {manifest_path}"
+                )
+            candidates.append(manifest_path)
         source_dir = report.get("source_dir")
         if source_dir:
             candidates.append(
