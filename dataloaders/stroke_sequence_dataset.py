@@ -46,9 +46,11 @@ class StrokeSequenceDataset(Dataset):
         self.max_cached_files = max(0, int(max_cached_files))
         self._cache: OrderedDict[Path, dict[str, np.ndarray]] = OrderedDict()
 
+        self.metadata = self._load_metadata()
+        self._verify_metadata()
         self.files = self._resolve_files(train_pattern, valid_file, test_file)
         self.index = self._build_index()
-        self.metadata = self._load_metadata()
+        self._verify_index()
 
     def __len__(self) -> int:
         return len(self.index)
@@ -80,20 +82,57 @@ class StrokeSequenceDataset(Dataset):
     def lengths(self) -> list[int]:
         return [entry.length for entry in self.index]
 
+    def _verify_metadata(self) -> None:
+        meta_format = str(self.metadata.get("format", ""))
+        is_tok_dict = (
+            self.format_type in {"tok_dict", "token", "tokens"}
+            or meta_format in {"tok_dict", "token", "tokens"}
+        )
+        if is_tok_dict or "is_published" in self.metadata:
+            meta_path = self.root / self.metadata_file
+            if not meta_path.is_file():
+                raise RuntimeError(
+                    f"Dataset at {self.root} is not published or build was interrupted. "
+                    f"Missing metadata file {self.metadata_file}."
+                )
+            if not bool(self.metadata.get("is_published", False)):
+                raise RuntimeError(
+                    f"Dataset at {self.root} is not published or build was interrupted. "
+                    "meta.npz is missing the verified publication marker."
+                )
+        # Older published archives did not record IDs; keep their legacy
+        # loader contract, but never silently downgrade a versioned dataset.
+        if meta_format in {"tok_dict", "token", "tokens"} and int(self.metadata.get("schema_version", 0)) >= 2:
+            for split in ("train", "valid", "test"):
+                if f"{split}_sample_ids" not in self.metadata:
+                    raise ValueError(f"Missing {split}_sample_ids in published metadata")
+
     def _resolve_files(self, train_pattern: str, valid_file: str, test_file: str) -> list[Path]:
         if not self.root.exists():
             raise FileNotFoundError(f"Dataset root does not exist: {self.root}")
 
         if self.split == "train":
-            files = sorted(self.root.glob(train_pattern))
+            if "train_chunks" in self.metadata:
+                files = [self.root / str(name) for name in self.metadata["train_chunks"]]
+            else:
+                files = sorted(self.root.glob(train_pattern))
         elif self.split == "valid":
-            files = [self.root / valid_file]
+            if "valid_chunks" in self.metadata:
+                files = [self.root / str(name) for name in self.metadata["valid_chunks"]]
+            else:
+                files = [self.root / valid_file]
         elif self.split == "test":
-            files = [self.root / test_file]
+            if "test_chunks" in self.metadata:
+                files = [self.root / str(name) for name in self.metadata["test_chunks"]]
+            else:
+                files = [self.root / test_file]
         else:
             raise ValueError("split must be one of: train, valid, test")
 
-        files = [path for path in files if path.exists()]
+        for path in files:
+            if not path.is_file():
+                raise FileNotFoundError(f"Required chunk file does not exist: {path}")
+
         if not files:
             raise FileNotFoundError(f"No {self.split} files found under {self.root}")
         return files
@@ -103,6 +142,11 @@ class StrokeSequenceDataset(Dataset):
         for file_path in self.files:
             data = self._read_npz(file_path)
             self._validate_chunk(data, file_path)
+            if f"{self.split}_sample_ids" in self.metadata:
+                if "sample_ids" not in data:
+                    raise ValueError(f"Missing sample_ids in published chunk {file_path}")
+                if len(data["sample_ids"]) != len(data["x"]):
+                    raise ValueError(f"Sample ID count mismatch in {file_path}")
             for local_index, stroke in enumerate(data["x"]):
                 sample_id = (
                     str(data["sample_ids"][local_index])
@@ -120,6 +164,42 @@ class StrokeSequenceDataset(Dataset):
         if not index:
             raise ValueError(f"Split {self.split} is empty under {self.root}")
         return index
+
+    def _verify_index(self) -> None:
+        chunk_count_key = f"{self.split}_chunk_counts"
+        if chunk_count_key in self.metadata:
+            expected_counts = list(self.metadata[chunk_count_key])
+            if len(expected_counts) != len(self.files):
+                raise ValueError(
+                    f"Chunk list length mismatch for split {self.split}: "
+                    f"expected {len(expected_counts)} chunks, found {len(self.files)}"
+                )
+            for file_path, expected_count in zip(self.files, expected_counts):
+                actual_count = sum(1 for entry in self.index if entry.file_path == file_path)
+                if actual_count != int(expected_count):
+                    raise ValueError(
+                        f"Chunk count mismatch in {file_path}: "
+                        f"expected {expected_count}, got {actual_count}"
+                    )
+
+        split_count_key = f"n_samples_{self.split}"
+        if split_count_key in self.metadata:
+            expected_total = int(self.metadata[split_count_key])
+            if len(self.index) != expected_total:
+                raise ValueError(
+                    f"Total sample count mismatch for split '{self.split}': "
+                    f"expected {expected_total}, got {len(self.index)}"
+                )
+
+        ids_key = f"{self.split}_sample_ids"
+        if ids_key in self.metadata:
+            expected_ids = [str(value) for value in self.metadata[ids_key]]
+            actual_ids = [entry.sample_id for entry in self.index]
+            if actual_ids != expected_ids:
+                raise ValueError(
+                    f"Sample IDs mismatch for split '{self.split}': "
+                    f"expected {expected_ids}, got {actual_ids}"
+                )
 
     def _load_metadata(self) -> dict[str, Any]:
         meta_path = self.root / self.metadata_file

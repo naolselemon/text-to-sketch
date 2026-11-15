@@ -1,4 +1,8 @@
 import argparse
+import os
+import shutil
+import uuid
+from itertools import chain
 from pathlib import Path
 
 import numpy as np
@@ -130,29 +134,88 @@ def main():
     train_labels = [0] * len(train_sketches)
     valid_labels = [0] * len(valid_sketches)
     test_labels = [0] * len(test_sketches)
-
     train_chunks_list = chunk_sketch_data(train_sketches, train_labels, args.n_chunks)
-    for chunk_idx, (chunk_sketches, chunk_labels) in enumerate(train_chunks_list):
-        chunk_file = target_path / f"train_{chunk_idx:03}.npz"
-        print(f"Saving train chunk {chunk_idx + 1}/{len(train_chunks_list)}: {chunk_file}")
-        save_chunk(chunk_file, chunk_sketches, chunk_labels)
 
-    print(f"Saving valid set ({len(valid_sketches)} sketches)")
-    save_chunk(target_path / "valid.npz", valid_sketches, valid_labels)
-    print(f"Saving test set ({len(test_sketches)} sketches)")
-    save_chunk(target_path / "test.npz", test_sketches, test_labels)
-
-    std, mean = compute_scale_stats(train_sketches)
+    preparation_id = uuid.uuid4().hex
+    staging_dir = target_path / f".staging_{preparation_id}"
+    version_dir = target_path / "versions" / preparation_id
     meta_file = target_path / "meta.npz"
-    np.savez(meta_file,
-             std=std,
-             mean=mean,
-             class_names=np.array(["anime"], dtype=object),    
-             n_classes=1,
-             n_samples_train=len(train_sketches),
-             n_samples_valid=len(valid_sketches),
-             n_samples_test=len(test_sketches))
-    print(f"Saved meta file: {meta_file}")
+    temp_meta = target_path / f".meta_{preparation_id}.tmp.npz"
+    staging_dir.mkdir()
+    try:
+        train_chunk_names = []
+        train_chunk_counts = []
+        for chunk_idx, (chunk_sketches, chunk_labels) in enumerate(train_chunks_list):
+            name = f"train_{chunk_idx:03}.npz"
+            save_chunk(staging_dir / name, chunk_sketches, chunk_labels)
+            train_chunk_names.append(name)
+            train_chunk_counts.append(len(chunk_sketches))
+
+        save_chunk(staging_dir / "valid.npz", valid_sketches, valid_labels)
+        save_chunk(staging_dir / "test.npz", test_sketches, test_labels)
+        for name, count in chain(
+            zip(train_chunk_names, train_chunk_counts),
+            (("valid.npz", len(valid_sketches)), ("test.npz", len(test_sketches))),
+        ):
+            with np.load(staging_dir / name, allow_pickle=True) as chunk:
+                if len(chunk["x"]) != count:
+                    raise ValueError(f"Staged chunk count mismatch: {name}")
+
+        std, mean = compute_scale_stats(train_sketches)
+        metadata = {
+            "std": std,
+            "mean": mean,
+            "class_names": np.array(["anime"], dtype=object),
+            "n_classes": 1,
+            "n_samples_train": len(train_sketches),
+            "n_samples_valid": len(valid_sketches),
+            "n_samples_test": len(test_sketches),
+            "train_chunk_counts": np.asarray(train_chunk_counts, dtype=np.int32),
+            "valid_chunk_counts": np.asarray([len(valid_sketches)], dtype=np.int32),
+            "test_chunk_counts": np.asarray([len(test_sketches)], dtype=np.int32),
+            "format": "stroke3",
+            "preparation_id": preparation_id,
+            "is_published": True,
+        }
+        # Each version can also be loaded directly, without the active root pointer.
+        np.savez(
+            staging_dir / "meta.npz",
+            **metadata,
+            train_chunks=np.asarray(train_chunk_names, dtype=object),
+            valid_chunks=np.asarray(["valid.npz"], dtype=object),
+            test_chunks=np.asarray(["test.npz"], dtype=object),
+        )
+        version_dir.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(staging_dir, version_dir)
+
+        # Retain the old root metadata for legacy datasets whose chunks live
+        # directly under target_path. New versions keep their own metadata.
+        if meta_file.is_file():
+            with np.load(meta_file, allow_pickle=True) as previous:
+                previous_id = (
+                    str(previous["preparation_id"])
+                    if "preparation_id" in previous
+                    else f"legacy_{uuid.uuid4().hex}"
+                )
+            old_meta = version_dir.parent / f"{previous_id}_meta.npz"
+            if not old_meta.exists():
+                shutil.copy2(meta_file, old_meta)
+
+        prefix = f"versions/{preparation_id}/"
+        np.savez(
+            temp_meta,
+            **metadata,
+            train_chunks=np.asarray([prefix + name for name in train_chunk_names], dtype=object),
+            valid_chunks=np.asarray([prefix + "valid.npz"], dtype=object),
+            test_chunks=np.asarray([prefix + "test.npz"], dtype=object),
+        )
+        os.replace(temp_meta, meta_file)
+    finally:
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir)
+        temp_meta.unlink(missing_ok=True)
+
+    print(f"Saved published stroke-3 dataset: {meta_file} (version={preparation_id})")
 
 
 if __name__ == "__main__":

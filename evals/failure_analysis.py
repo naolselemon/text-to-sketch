@@ -502,7 +502,11 @@ def analyze_codebook(
     codebook = np.load(codebook_path)
     codebook_size = len(codebook)
 
-    if split == "train":
+    if (dataset_root / "meta.npz").is_file():
+        from dataloaders.stroke_sequence_dataset import StrokeSequenceDataset
+
+        files = StrokeSequenceDataset(dataset_root, split=split).files
+    elif split == "train":
         files = sorted(dataset_root.glob("train_*.npz"))
     elif split == "valid":
         files = [dataset_root / "valid.npz"]
@@ -520,19 +524,19 @@ def analyze_codebook(
     total_motion_tokens = 0
 
     for file_path in files:
-        data = np.load(file_path, allow_pickle=True)
-        sequences = data["x"]
-        for seq in sequences:
-            tokens = np.asarray(seq, dtype=np.int64)
-            motion_mask = np.ones(len(tokens), dtype=bool)
-            for st in special_tokens:
-                motion_mask &= tokens != st
-            motion_tokens = tokens[motion_mask]
-            adjusted = motion_tokens - motion_token_offset
-            valid = (adjusted >= 0) & (adjusted < codebook_size)
-            for idx in adjusted[valid]:
-                usage_counts[idx] += 1
-            total_motion_tokens += int(valid.sum())
+        with np.load(file_path, allow_pickle=True) as data:
+            sequences = data["x"]
+            for seq in sequences:
+                tokens = np.asarray(seq, dtype=np.int64)
+                motion_mask = np.ones(len(tokens), dtype=bool)
+                for st in special_tokens:
+                    motion_mask &= tokens != st
+                motion_tokens = tokens[motion_mask]
+                adjusted = motion_tokens - motion_token_offset
+                valid = (adjusted >= 0) & (adjusted < codebook_size)
+                for idx in adjusted[valid]:
+                    usage_counts[idx] += 1
+                total_motion_tokens += int(valid.sum())
 
     used_entries = int(np.sum(usage_counts > 0))
     dead_entries = codebook_size - used_entries

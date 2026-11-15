@@ -51,6 +51,13 @@ class StrokeSequenceDatasetTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _write_token_chunk(root / "train_000.npz", [[1002, 1, 1003], [1002, 2, 1001, 1003]])
+            np.savez(
+                root / "meta.npz",
+                is_published=True,
+                train_chunks=np.asarray(["train_000.npz"], dtype=object),
+                train_chunk_counts=np.asarray([2], dtype=np.int32),
+                n_samples_train=2,
+            )
 
             dataset = StrokeSequenceDataset(
                 root,
@@ -63,6 +70,40 @@ class StrokeSequenceDatasetTest(unittest.TestCase):
             self.assertEqual(sample["tokens"].tolist(), [1002, 1, 1003])
             self.assertNotIn("stroke3", sample)
             self.assertEqual(sample["length"], 3)
+
+    def test_versioned_metadata_rejects_same_count_swapped_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tokens = np.asarray([np.asarray([1002, 1, 1003]) for _ in range(2)], dtype=object)
+            np.savez_compressed(root / "train_000.npz", x=tokens, y=np.asarray([0, 0]),
+                                sample_ids=np.asarray(["second", "first"], dtype=object))
+            np.savez(root / "meta.npz", schema_version=2, is_published=True, format="tok_dict",
+                     train_chunks=np.asarray(["train_000.npz"], dtype=object),
+                     train_chunk_counts=np.asarray([2]), n_samples_train=2,
+                     train_sample_ids=np.asarray(["first", "second"], dtype=object),
+                     valid_sample_ids=np.asarray([], dtype=object),
+                     test_sample_ids=np.asarray([], dtype=object))
+            with self.assertRaisesRegex(ValueError, "Sample IDs mismatch"):
+                StrokeSequenceDataset(root, split="train", format_type="tok_dict")
+
+    def test_versioned_metadata_rejects_missing_chunk_or_metadata_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_token_chunk(root / "train_000.npz", [[1002, 1, 1003]])
+            meta = {
+                "schema_version": 2, "is_published": True, "format": "tok_dict",
+                "train_chunks": np.asarray(["train_000.npz"], dtype=object),
+                "train_sample_ids": np.asarray(["first"], dtype=object),
+                "valid_sample_ids": np.asarray([], dtype=object),
+                "test_sample_ids": np.asarray([], dtype=object),
+            }
+            np.savez(root / "meta.npz", **meta)
+            with self.assertRaisesRegex(ValueError, "Missing sample_ids in published chunk"):
+                StrokeSequenceDataset(root, split="train", format_type="tok_dict")
+            del meta["train_sample_ids"]
+            np.savez(root / "meta.npz", **meta)
+            with self.assertRaisesRegex(ValueError, "Missing train_sample_ids in published metadata"):
+                StrokeSequenceDataset(root, split="train", format_type="tok_dict")
 
     def test_raises_for_missing_split_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
