@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -99,6 +101,35 @@ def inspect_tensorflow_checkpoint(prefix: str | Path) -> TensorFlowCheckpoint:
         index_file=index_file,
         data_files=data_files,
     )
+
+
+def fingerprint_tensorflow_checkpoint(prefix: str | Path) -> str:
+    """Hash the TensorFlow index and ordered data shards without loading the model."""
+    checkpoint = inspect_tensorflow_checkpoint(prefix)
+    if not checkpoint.exists:
+        raise FileNotFoundError(f"Incomplete TensorFlow checkpoint: {checkpoint.prefix}")
+    shard_indices: set[int] = set()
+    shard_count: int | None = None
+    for path in checkpoint.data_files:
+        match = re.fullmatch(
+            rf"{re.escape(checkpoint.prefix.name)}\.data-(\d+)-of-(\d+)",
+            path.name,
+        )
+        if match is None:
+            raise ValueError(f"Unexpected TensorFlow data shard: {path}")
+        index, total = map(int, match.groups())
+        if total < 1 or (shard_count is not None and total != shard_count):
+            raise ValueError(f"Inconsistent TensorFlow checkpoint shards: {checkpoint.prefix}")
+        shard_count = total
+        shard_indices.add(index)
+    if shard_count is None or shard_indices != set(range(shard_count)):
+        raise FileNotFoundError(f"Incomplete TensorFlow checkpoint shards: {checkpoint.prefix}")
+    digest = hashlib.sha256()
+    for path in (checkpoint.index_file, *checkpoint.data_files):
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _load_json(path: Path, issues: list[ValidationIssue]) -> dict[str, Any]:

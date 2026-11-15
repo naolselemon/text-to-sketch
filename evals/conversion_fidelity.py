@@ -1,12 +1,9 @@
-"""Conversion fidelity and parity analysis between TensorFlow and PyTorch.
+"""Mask-aware logit metrics and verified TensorFlow-to-PyTorch conversion gate.
 
-Evaluates whether model checkpoint conversion (TensorFlow -> PyTorch) preserved
-numerical parity:
-- Flattened logit cosine similarity (target >= 0.999)
-- Token argmax agreement rate (target >= 0.99)
-- Top-k candidate agreement (top-3, top-5)
-- Maximum absolute logit difference
-- Parameter count and norm checks
+``compute_parity_metrics`` and ``evaluate_logits_files`` support legacy numeric
+comparisons without attesting input or checkpoint provenance. Their CLI cannot
+pass the conversion gate. Use ``scripts.sketchformer.parity_check compare`` with
+the original TF and converted checkpoint exports for verified parity.
 """
 
 from __future__ import annotations
@@ -248,6 +245,7 @@ def evaluate_logits_files(
         "candidate_sha256": _file_hash(candidate_path),
         "reference_sha256": _file_hash(reference_path),
         "validity_source": validity_source,
+        "verification": "unverified_numeric_comparison_not_tf_parity",
         **results,
     }
     if mask is not None:
@@ -260,6 +258,115 @@ def evaluate_logits_files(
             json.dumps(report, indent=2, allow_nan=False), encoding="utf-8"
         )
         print(f"[conversion_fidelity] saved report to {report_path}")
+    return report
+
+def evaluate_verified_parity(
+    candidate_path: Path,
+    reference_path: Path,
+    input_path: Path,
+    *,
+    candidate_checkpoint: Path,
+    original_checkpoint: Path,
+    original_config: Path,
+    original_dictionary: Path,
+    codebook: Path,
+    min_cosine: float = 0.999,
+    min_agreement: float = 0.99,
+    max_abs_diff: float = 0.01,
+    output_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Gate only TF-original and converted-checkpoint exports of identical real inputs.
+
+    The exported input tokens include padding to the original 200-position memory
+    width; logits at position j predict tokens[j+1]. Only lengths-1 positions
+    contribute to the comparison.
+    """
+    from safetensors import safe_open
+    from models.sketchformer.pretrained import fingerprint_tensorflow_checkpoint
+    from scripts.sketchformer.tf_reference_export import LAYOUT, validate_input
+
+    candidate_path, reference_path, input_path = map(
+        Path, (candidate_path, reference_path, input_path)
+    )
+    candidate_checkpoint = Path(candidate_checkpoint)
+    inputs = validate_input(
+        input_path, original_dictionary=original_dictionary, codebook=codebook
+    )
+    source_hash = fingerprint_tensorflow_checkpoint(original_checkpoint)
+    layout = json.dumps(LAYOUT, sort_keys=True, separators=(",", ":"))
+    with safe_open(str(candidate_checkpoint), framework="pt", device="cpu") as source:
+        checkpoint_meta = source.metadata() or {}
+    required_checkpoint = {
+        "source_tf_checkpoint_sha256": source_hash,
+        "codebook_sha256": inputs["metadata"]["codebook_sha256"],
+        "token_layout_json": layout,
+    }
+    if any(checkpoint_meta.get(key) != value for key, value in required_checkpoint.items()):
+        raise ValueError("Converted checkpoint lacks matching original checkpoint/codebook/token-layout identity")
+
+    logits = []
+    for path, framework in (
+        (reference_path, "tensorflow_original"),
+        (candidate_path, "pytorch_converted"),
+    ):
+        with np.load(path, allow_pickle=False) as export:
+            required = {"logits", "tokens", "lengths", "sample_ids", "metadata"}
+            if not required.issubset(export.files):
+                raise ValueError(f"Missing export fields in {path}: {sorted(required - set(export.files))}")
+            metadata = json.loads(str(export["metadata"].item()))
+            expected = {
+                "framework": framework,
+                "input_sha256": _file_hash(input_path),
+                "source_tf_checkpoint_sha256": source_hash,
+                "codebook_sha256": inputs["metadata"]["codebook_sha256"],
+                "original_dictionary_sha256": inputs["metadata"]["original_dictionary_sha256"],
+                "token_layout_json": layout,
+                "logit_layout": "tokens[:, :-1] predict tokens[:, 1:]",
+            }
+            if framework == "tensorflow_original":
+                expected["original_config_sha256"] = _file_hash(Path(original_config))
+            if framework == "pytorch_converted":
+                expected["converted_checkpoint_sha256"] = _file_hash(candidate_checkpoint)
+            if any(metadata.get(key) != value for key, value in expected.items()):
+                raise ValueError(f"Export identity mismatch for {path}")
+            for key in ("tokens", "lengths", "sample_ids"):
+                if export[key].dtype != inputs[key].dtype or not np.array_equal(export[key], inputs[key]):
+                    raise ValueError(f"Export {path} changed input {key}")
+            prediction = export["logits"]
+            expected_shape = (len(inputs["lengths"]), 199, LAYOUT["vocab_size"])
+            if prediction.shape != expected_shape or prediction.dtype != np.float32:
+                raise ValueError(f"Export {path} requires float32 logits {expected_shape}")
+            logits.append(prediction)
+    result = compute_parity_metrics(
+        logits[1], logits[0], min_cosine=min_cosine, min_agreement=min_agreement,
+        lengths=inputs["lengths"] - 1,
+    )
+    valid = np.arange(199)[None, :] < (inputs["lengths"] - 1)[:, None]
+    same_predictions = bool(np.array_equal(
+        logits[1].argmax(-1)[valid], logits[0].argmax(-1)[valid]
+    ))
+    max_valid_difference = float(np.max(np.abs(logits[1][valid] - logits[0][valid])))
+    if not same_predictions or max_valid_difference > max_abs_diff:
+        result["status"] = "FAIL"
+    result["thresholds"]["all_predictions_match"] = same_predictions
+    result["thresholds"]["max_absolute_difference"] = max_abs_diff
+    result["thresholds"]["absolute_difference_passed"] = max_valid_difference <= max_abs_diff
+    report = {
+        **result, "verification": "original_tensorflow_vs_converted_pytorch",
+        "sample_ids": inputs["sample_ids"].tolist(),
+        "input_sha256": _file_hash(input_path),
+        "reference_sha256": _file_hash(reference_path),
+        "candidate_sha256": _file_hash(candidate_path),
+        "original_checkpoint_sha256": source_hash,
+        "converted_checkpoint_sha256": _file_hash(candidate_checkpoint),
+        "codebook_sha256": inputs["metadata"]["codebook_sha256"],
+    }
+    if output_dir is not None:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "conversion_fidelity_report.json").write_text(
+            json.dumps(report, indent=2, allow_nan=False), encoding="utf-8"
+        )
     return report
 
 
@@ -357,10 +464,12 @@ def main() -> int:
         status = report["status"]
         cosine = report["metrics"]["global_cosine_similarity"]
         agreement = report["metrics"]["argmax_agreement"]
-        print(f"\n[conversion_fidelity] Result: {status}")
+        print(f"\n[conversion_fidelity] UNVERIFIED numeric result: {status}")
         print(f"  Cosine Similarity: {cosine:.6f} (target >= {args.min_cosine})")
         print(f"  Argmax Agreement : {agreement:.6f} (target >= {args.min_agreement})")
-        return 0 if status == "PASS" else 1
+        print("  No checkpoint, codebook, sample, or TensorFlow identity was verified.")
+        print("  Use scripts.sketchformer.parity_check compare for the strict TF parity gate.")
+        return 1
 
     print(
         "[conversion_fidelity] Error: Please provide both --candidate-logits and --reference-logits."
