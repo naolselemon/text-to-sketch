@@ -29,6 +29,8 @@ tts-compare-rdp = "metrics.preprocessing.compare_rdp_epsilon:main"
 tts-evaluate-encoder = "metrics.preprocessing.evaluate_encoder:main"
 tts-evaluate-ordering = "metrics.preprocessing.evaluate_ordering:main"
 tts-evaluate-centerline-preprocessing = "metrics.preprocessing.evaluate_centerline_preprocessing:main"
+tts-inspect-checkpoint-data = "scripts.sketchformer.inspect_checkpoint_data:main"
+tts-detect-duplicates = "prep_data.deduplication:main"
 
 [tool.setuptools.packages.find]
 include = [

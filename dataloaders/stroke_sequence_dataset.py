@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
+import json
+import warnings
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -37,6 +41,9 @@ class StrokeSequenceDataset(Dataset):
         format_type: str = "stroke3",
         transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         max_cached_files: int = 2,
+        lineage: Any | None = None,
+        verify_integrity: bool = True,
+        allow_unverified: bool = False,
     ) -> None:
         self.root = Path(root)
         self.split = split
@@ -44,13 +51,57 @@ class StrokeSequenceDataset(Dataset):
         self.format_type = format_type
         self.transform = transform
         self.max_cached_files = max(0, int(max_cached_files))
-        self._cache: OrderedDict[Path, dict[str, np.ndarray]] = OrderedDict()
+        self.lineage = lineage
+        self.verify_integrity = bool(verify_integrity)
+        self.allow_unverified = bool(allow_unverified)
+        self._cache: OrderedDict[Path, tuple[dict[str, np.ndarray], float]] = OrderedDict()
 
         self.metadata = self._load_metadata()
         self._verify_metadata()
+        self.declared_checksums: dict[str, str] = self._resolve_chunk_checksums()
         self.files = self._resolve_files(train_pattern, valid_file, test_file)
         self.index = self._build_index()
         self._verify_index()
+
+    def _resolve_chunk_checksums(self) -> dict[str, str]:
+        if self.lineage is not None:
+            lineage_root = self.lineage.metadata.get("root") if hasattr(self.lineage, "metadata") and self.lineage.metadata else None
+            if lineage_root:
+                try:
+                    if Path(lineage_root).resolve() != self.root.resolve():
+                        raise ValueError(
+                            f"DataLoader root mismatch: dataset initialized with {self.root} "
+                            f"but lineage was verified for {lineage_root}"
+                        )
+                except Exception as e:
+                    if isinstance(e, ValueError):
+                        raise
+            meta_build_id = str(self.metadata.get("build_id", "")).strip()
+            lineage_build_id = str(getattr(self.lineage, "build_id", "")).strip()
+            if meta_build_id and lineage_build_id and meta_build_id != lineage_build_id:
+                raise ValueError(
+                    f"DataLoader build_id mismatch: dataset has build_id '{meta_build_id}' "
+                    f"but lineage has '{lineage_build_id}'"
+                )
+            if not getattr(self.lineage, "is_verified", False) and not self.allow_unverified:
+                raise ValueError(
+                    "Provided dataset lineage is unverified. Pass allow_unverified=True to permit loading."
+                )
+
+        declared_checksums: dict[str, str] = {}
+        if self.lineage is not None and getattr(self.lineage, "chunk_checksums", None):
+            declared_checksums = {str(k): str(v) for k, v in self.lineage.chunk_checksums.items()}
+        elif "chunk_checksums" in self.metadata:
+            raw = self.metadata["chunk_checksums"]
+            if isinstance(raw, str):
+                try:
+                    declared_checksums = json.loads(raw)
+                except Exception:
+                    pass
+            elif isinstance(raw, dict):
+                declared_checksums = {str(k): str(v) for k, v in raw.items()}
+
+        return declared_checksums
 
     def __len__(self) -> int:
         return len(self.index)
@@ -69,9 +120,9 @@ class StrokeSequenceDataset(Dataset):
             "sample_id": entry.sample_id,
         }
         if self.format_type in {"tok_dict", "token", "tokens"}:
-            sample["tokens"] = np.asarray(sequence, dtype=np.int64)
+            sample["tokens"] = np.array(sequence, dtype=np.int64, copy=True)
         elif self.format_type == "stroke3":
-            sample["stroke3"] = np.asarray(sequence, dtype=np.float32)
+            sample["stroke3"] = np.array(sequence, dtype=np.float32, copy=True)
         else:
             raise ValueError("format_type must be one of: stroke3, tok_dict")
         if self.transform is not None:
@@ -192,25 +243,87 @@ class StrokeSequenceDataset(Dataset):
                 metadata[key] = value.item() if value.shape == () else value
         return metadata
 
+    @staticmethod
+    def _make_read_only(data: dict[str, np.ndarray]) -> None:
+        """Mark arrays in chunk data as read-only to prevent in-place cache mutation."""
+        for val in data.values():
+            if isinstance(val, np.ndarray):
+                try:
+                    val.setflags(write=False)
+                except (ValueError, AttributeError):
+                    pass
+                if val.dtype == object:
+                    for item in val:
+                        if isinstance(item, np.ndarray):
+                            try:
+                                item.setflags(write=False)
+                            except (ValueError, AttributeError):
+                                pass
+
     def _load_chunk(self, file_path: Path) -> dict[str, np.ndarray]:
         if self.max_cached_files == 0:
             return self._read_npz(file_path)
 
         cached = self._cache.get(file_path)
         if cached is not None:
+            data, cached_mtime, cached_size = cached
+            if self.verify_integrity and self.declared_checksums:
+                st = file_path.stat() if file_path.exists() else None
+                current_mtime = st.st_mtime if st else 0.0
+                current_size = st.st_size if st else 0
+                if current_mtime != cached_mtime or current_size != cached_size:
+                    # File on disk changed since caching - re-read & re-verify
+                    data = self._read_npz(file_path)
+                    self._cache[file_path] = (data, current_mtime, current_size)
             self._cache.move_to_end(file_path)
-            return cached
+            return data
 
         loaded = self._read_npz(file_path)
-        self._cache[file_path] = loaded
+        st = file_path.stat() if file_path.exists() else None
+        current_mtime = st.st_mtime if st else 0.0
+        current_size = st.st_size if st else 0
+        self._cache[file_path] = (loaded, current_mtime, current_size)
         while len(self._cache) > self.max_cached_files:
             self._cache.popitem(last=False)
         return loaded
 
-    @staticmethod
-    def _read_npz(file_path: Path) -> dict[str, np.ndarray]:
+    def _read_npz(self, file_path: Path) -> dict[str, np.ndarray]:
+        if self.verify_integrity and self.declared_checksums:
+            chunk_name = file_path.name
+            expected_checksum = self.declared_checksums.get(chunk_name)
+            if expected_checksum is None:
+                if not self.allow_unverified:
+                    raise ValueError(
+                        f"Chunk file '{chunk_name}' has no declared checksum in verified lineage. "
+                        "Rejecting unverified chunk."
+                    )
+                warnings.warn(
+                    f"Reading chunk '{chunk_name}' without verified checksum.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                with np.load(file_path, allow_pickle=True) as data:
+                    res = {key: data[key] for key in data.files}
+                    self._make_read_only(res)
+                    return res
+
+            raw_bytes = file_path.read_bytes()
+            actual_checksum = hashlib.sha256(raw_bytes).hexdigest()
+            if actual_checksum != expected_checksum:
+                raise ValueError(
+                    f"Chunk integrity check failed for '{chunk_name}': "
+                    f"expected sha256 {expected_checksum}, got {actual_checksum}. "
+                    "Chunk contents have been modified or corrupted!"
+                )
+            with np.load(io.BytesIO(raw_bytes), allow_pickle=True) as data:
+                res = {key: data[key] for key in data.files}
+                self._make_read_only(res)
+                return res
+
         with np.load(file_path, allow_pickle=True) as data:
-            return {key: data[key] for key in data.files}
+            res = {key: data[key] for key in data.files}
+            self._make_read_only(res)
+            return res
 
     @staticmethod
     def _validate_chunk(data: dict[str, np.ndarray], file_path: Path) -> None:

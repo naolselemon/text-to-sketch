@@ -13,10 +13,24 @@ from dataloaders.masks import (
     make_sdpa_self_attention_mask,
     valid_to_padding_mask,
 )
+from dataloaders.lineage import (
+    DatasetLineage,
+    compute_chunk_checksum,
+    compute_dataset_fingerprint,
+    compute_split_hash,
+    load_dataset_lineage,
+    query_sample_membership,
+)
 from dataloaders.stroke_sequence_dataset import StrokeSequenceDataset
 from dataloaders.transforms import Stroke3Transform, TokenSequenceTransform
 
 __all__ = [
+    "DatasetLineage",
+    "compute_chunk_checksum",
+    "compute_dataset_fingerprint",
+    "compute_split_hash",
+    "load_dataset_lineage",
+    "query_sample_membership",
     "LengthBucketBatchSampler",
     "TokenBudgetBatchSampler",
     "Stroke3Collator",

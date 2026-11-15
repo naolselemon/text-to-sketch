@@ -11,6 +11,7 @@ import hashlib
 import json
 import pickle
 import sys
+import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -66,20 +67,100 @@ def build_codebook(
 
 # Persistence helpers
 
-def compute_codebook_fingerprint(codebook: np.ndarray | Path | str) -> str:
-    """Compute deterministic SHA256 fingerprint of a codebook array or file."""
+def compute_codebook_artifact_checksum(codebook: np.ndarray | Path | str) -> str:
+    """Compute deterministic SHA256 checksum over normalized float32 cluster centers.
+
+    Ensures identical checksum whether supplied as a file path (.npy) or an in-memory array.
+    """
     if isinstance(codebook, (str, Path)):
-        return hashlib.sha256(Path(codebook).read_bytes()).hexdigest()
-    array = np.asarray(codebook, dtype=np.float32)
+        p = Path(codebook)
+        if not p.is_file():
+            raise FileNotFoundError(f"Codebook file not found: {p}")
+        if p.suffix == ".npy":
+            arr = np.load(p, allow_pickle=False)
+            return compute_codebook_artifact_checksum(arr)
+        return hashlib.sha256(p.read_bytes()).hexdigest()
+
+    array = np.ascontiguousarray(np.asarray(codebook, dtype=np.float32))
     return hashlib.sha256(array.tobytes()).hexdigest()
 
 
-def get_token_dict_fingerprint(token_dict_dir: Path | str) -> str:
-    """Return SHA256 fingerprint of codebook.npy in token_dict_dir."""
-    npy_path = Path(token_dict_dir) / "codebook.npy"
-    if not npy_path.exists():
-        raise FileNotFoundError(f"Codebook file not found in {token_dict_dir}: {npy_path}")
-    return hashlib.sha256(npy_path.read_bytes()).hexdigest()
+def compute_codebook_fingerprint(codebook: np.ndarray | Path | str) -> str:
+    """Backward-compatible alias for compute_codebook_artifact_checksum."""
+    return compute_codebook_artifact_checksum(codebook)
+
+
+def compute_token_dictionary_fingerprint(
+    codebook: np.ndarray | Path | str,
+    *,
+    codebook_size: int | None = None,
+    motion_token_offset: int = 1,
+    pad_token_id: int = 0,
+    sep_token_id: int | None = None,
+    sos_token_id: int | None = None,
+    eos_token_id: int | None = None,
+    vocab_size: int | None = None,
+) -> str:
+    """Compute semantic token dictionary fingerprint including codebook and token layout.
+
+    Distinguishes semantic vocabulary identity from file format differences. Does not
+    hash non-semantic metadata such as creation timestamps or file paths.
+    """
+    codebook_sha256 = compute_codebook_artifact_checksum(codebook)
+    if isinstance(codebook, (str, Path)):
+        p = Path(codebook)
+        if p.suffix == ".npy":
+            arr = np.load(p, allow_pickle=False)
+            k = len(arr)
+        else:
+            k = codebook_size if codebook_size is not None else 1000
+    else:
+        k = len(codebook)
+
+    k_actual = codebook_size if codebook_size is not None else k
+    sep_id = sep_token_id if sep_token_id is not None else (k_actual + motion_token_offset)
+    sos_id = sos_token_id if sos_token_id is not None else (sep_id + 1)
+    eos_id = eos_token_id if eos_token_id is not None else (sos_id + 1)
+    v_size = vocab_size if vocab_size is not None else (eos_id + 1)
+
+    payload = {
+        "codebook_sha256": codebook_sha256,
+        "codebook_size": int(k_actual),
+        "motion_token_offset": int(motion_token_offset),
+        "pad_token_id": int(pad_token_id),
+        "sep_token_id": int(sep_id),
+        "sos_token_id": int(sos_id),
+        "eos_token_id": int(eos_id),
+        "vocab_size": int(v_size),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def get_token_dict_fingerprint(
+    token_dict_dir: Path | str,
+    *,
+    allow_unverified: bool = False,
+) -> str:
+    """Return canonical semantic token dictionary fingerprint of token_dict_dir."""
+    codebook, metadata = load_codebook_from_dir(token_dict_dir, allow_unverified=allow_unverified)
+    if not metadata.get("is_verified", False):
+        if not allow_unverified:
+            raise ValueError(
+                f"Cannot compute verified token dictionary fingerprint for unverified token dictionary at {token_dict_dir}"
+            )
+        return ""
+    token_layout = metadata.get("token_layout", {})
+    return compute_token_dictionary_fingerprint(
+        codebook,
+        codebook_size=metadata.get("K", len(codebook)),
+        motion_token_offset=int(token_layout.get("motion_token_offset", 1)),
+        pad_token_id=int(token_layout.get("pad_token_id", 0)),
+        sep_token_id=int(token_layout["sep_token_id"]) if "sep_token_id" in token_layout else None,
+        sos_token_id=int(token_layout["sos_token_id"]) if "sos_token_id" in token_layout else None,
+        eos_token_id=int(token_layout["eos_token_id"]) if "eos_token_id" in token_layout else None,
+        vocab_size=int(token_layout["vocab_size"]) if "vocab_size" in token_layout else None,
+    )
 
 
 def save_codebook(
@@ -94,49 +175,102 @@ def save_codebook(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    npy_path  = output_dir / "codebook.npy"
+    npy_path = output_dir / "codebook.npy"
     meta_path = output_dir / "metadata.json"
 
     np.save(npy_path, codebook)
-    codebook_sha256 = hashlib.sha256(npy_path.read_bytes()).hexdigest()
+    codebook_sha256 = compute_codebook_artifact_checksum(codebook)
+
+    token_layout = {
+        "pad_token_id": 0,
+        "motion_token_offset": 1,
+        "sep_token_id": K + 1,
+        "sos_token_id": K + 2,
+        "eos_token_id": K + 3,
+        "vocab_size": K + 4,
+    }
+    semantic_fingerprint = compute_token_dictionary_fingerprint(
+        codebook,
+        codebook_size=K,
+        **token_layout,
+    )
 
     metadata = {
         "K": K,
         "n_samples": n_samples,
         "codebook_shape": list(codebook.shape),
         "codebook_sha256": codebook_sha256,
+        "dictionary_fingerprint": semantic_fingerprint,
+        "token_layout": token_layout,
+        "is_verified": True,
         "timestamp": datetime.now(tz=timezone.utc).isoformat(),
     }
     if source is not None:
         metadata["source"] = source
-        metadata["token_layout"] = {
-            "pad_token_id": 0,
-            "motion_token_offset": 1,
-            "sep_token_id": K + 1,
-            "sos_token_id": K + 2,
-            "eos_token_id": K + 3,
-            "vocab_size": K + 4,
-        }
-    with open(meta_path, "w") as fh:
+    with open(meta_path, "w", encoding="utf-8") as fh:
         json.dump(metadata, fh, indent=2)
 
     return npy_path, meta_path
 
 
-def load_codebook_from_dir(sketch_token_dir: Path) -> tuple[np.ndarray, dict]:
-    """Load a saved codebook and its metadata from *sketch_token_dir*.
+def load_codebook_from_dir(
+    sketch_token_dir: Path | str,
+    *,
+    allow_unverified: bool = False,
+) -> tuple[np.ndarray, dict]:
+    """Load a saved codebook and its metadata from *sketch_token_dir*, validating checksum.
 
-    Returns
-    -------
-    (codebook, metadata) tuple.
+    Parameters
+    ----------
+    sketch_token_dir : Path | str
+        Directory containing codebook.npy and metadata.json.
+    allow_unverified : bool
+        If False (default), strictly requires metadata.json to exist with a valid
+        recorded 'codebook_sha256' that matches the codebook array.
+        If True, permits loading legacy codebooks lacking recorded checksums,
+        marking metadata['is_verified'] = False and metadata['codebook_sha256'] = None.
+        Corrupted codebooks with mismatching declared checksums are ALWAYS rejected.
     """
     sketch_token_dir = Path(sketch_token_dir)
     npy_path = sketch_token_dir / "codebook.npy"
-    codebook = np.load(npy_path)
-    with open(sketch_token_dir / "metadata.json") as fh:
-        metadata = json.load(fh)
-    if "codebook_sha256" not in metadata and npy_path.exists():
-        metadata["codebook_sha256"] = hashlib.sha256(npy_path.read_bytes()).hexdigest()
+    if not npy_path.is_file():
+        raise FileNotFoundError(f"Codebook file not found in {sketch_token_dir}: {npy_path}")
+
+    codebook = np.load(npy_path, allow_pickle=False)
+    actual_sha256 = compute_codebook_artifact_checksum(codebook)
+
+    meta_path = sketch_token_dir / "metadata.json"
+    metadata: dict[str, Any] = {}
+    if meta_path.is_file():
+        with open(meta_path, encoding="utf-8") as fh:
+            metadata = json.load(fh)
+
+    declared_sha256 = metadata.get("codebook_sha256")
+    if declared_sha256 is not None and str(declared_sha256).strip():
+        declared_str = str(declared_sha256).strip()
+        if declared_str != actual_sha256:
+            raise ValueError(
+                f"Codebook artifact checksum mismatch in {sketch_token_dir}: "
+                f"metadata records {declared_str}, actual is {actual_sha256}. "
+                f"Codebook file has been modified or corrupted!"
+            )
+        metadata["codebook_sha256"] = declared_str
+        metadata["is_verified"] = True
+    else:
+        if not allow_unverified:
+            raise ValueError(
+                f"Token dictionary at {sketch_token_dir} lacks verified 'codebook_sha256' metadata. "
+                "Codebook artifact integrity cannot be verified. Pass allow_unverified=True for legacy dictionaries."
+            )
+        warnings.warn(
+            f"Loading codebook from {sketch_token_dir} in unverified legacy mode without recorded checksum.",
+            UserWarning,
+            stacklevel=2,
+        )
+        metadata["codebook_sha256"] = None
+        metadata["is_verified"] = False
+        metadata.pop("dictionary_fingerprint", None)
+
     return codebook, metadata
 
 

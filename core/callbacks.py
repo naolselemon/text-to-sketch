@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -47,6 +48,8 @@ class CheckpointCallback:
     monitor: str = "val/token_loss"
     mode: str = "min"
     save_last: bool = True
+    lineage: Any = None
+    config: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         self.directory = Path(self.directory)
@@ -61,8 +64,12 @@ class CheckpointCallback:
         epoch: int,
         step: int,
         metrics: dict[str, Any],
+        lineage: Any = None,
+        config: Mapping[str, Any] | None = None,
     ) -> dict[str, Path]:
         saved: dict[str, Path] = {}
+        active_lineage = lineage if lineage is not None else self.lineage
+        active_config = config if config is not None else self.config
         if self.save_last:
             saved["last"] = save_checkpoint(
                 self.directory / "last.pt",
@@ -71,7 +78,9 @@ class CheckpointCallback:
                 scheduler=scheduler,
                 epoch=epoch,
                 step=step,
+                config=active_config,
                 metrics=metrics,
+                lineage=active_lineage,
             )
         if self.tracker.update(metrics):
             saved["best"] = save_checkpoint(
@@ -81,6 +90,8 @@ class CheckpointCallback:
                 scheduler=scheduler,
                 epoch=epoch,
                 step=step,
+                config=active_config,
                 metrics=metrics,
+                lineage=active_lineage,
             )
         return saved
