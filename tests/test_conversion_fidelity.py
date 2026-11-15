@@ -72,6 +72,9 @@ class TestConversionFidelity(unittest.TestCase):
 
             report = evaluate_logits_files(cand_path, ref_path, output_dir=out_dir)
             self.assertEqual(report["status"], "PASS")
+            self.assertEqual(
+                report["verification"], "unverified_numeric_comparison_not_tf_parity"
+            )
 
             report_file = out_dir / "conversion_fidelity_report.json"
             self.assertTrue(report_file.exists())
