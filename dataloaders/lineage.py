@@ -58,8 +58,31 @@ class DatasetLineage:
             created_at=str(data.get("created_at", "")),
             metadata=metadata,
             schema_version=int(data.get("schema_version", 2)),
-            is_verified=bool(data.get("is_verified", False)),
+            is_verified=_validate_is_verified(data.get("is_verified", False), default=False),
         )
+
+
+def _validate_is_verified(val: Any, default: bool = False) -> bool:
+    """Strictly validate that is_verified is genuinely a boolean.
+
+    Accepts genuine Python booleans (bool), NumPy scalar booleans (np.bool_),
+    or zero-dimensional scalar boolean NumPy arrays (np.ndarray of dtype bool and ndim 0).
+
+    Rejects non-boolean types (e.g. strings, non-boolean integers, floats,
+    arbitrary collections or multi-element arrays) instead of loosely coercing with bool().
+
+    Raises ValueError if an invalid non-boolean value is provided.
+    """
+    if val is None:
+        return default
+    if isinstance(val, (bool, np.bool_)):
+        return bool(val)
+    if isinstance(val, np.ndarray) and val.dtype == bool and val.ndim == 0:
+        return bool(val.item())
+    raise ValueError(
+        f"Invalid non-boolean value for 'is_verified': {val!r} (type {type(val).__name__}). "
+        "Expected strict boolean True or False."
+    )
 
 
 def compute_chunk_checksum(path: str | Path, chunk_size: int = 65536) -> str:
@@ -304,9 +327,16 @@ def load_dataset_lineage(
                 metadata={"is_legacy": True, "root": str(root)},
             )
 
-        if format_type in {"tok_dict", "token", "tokens"} and not dictionary_fingerprint:
+        missing_dict_fp = format_type in {"tok_dict", "token", "tokens"} and not dictionary_fingerprint
+        if missing_dict_fp:
             if not allow_unverified:
                 raise ValueError(f"Dataset metadata at {meta_path} is missing required dictionary_fingerprint")
+            warnings.warn(
+                f"Dataset at {root} is token-based but lacks verified dictionary_fingerprint. "
+                "Loaded in unverified legacy mode.",
+                UserWarning,
+                stacklevel=2,
+            )
 
         precomputed_train_hash = str(meta.get("split_hash_train", "")).strip()
         precomputed_valid_hash = str(meta.get("split_hash_valid", "")).strip()
@@ -347,6 +377,8 @@ def load_dataset_lineage(
     lineage_metadata: dict[str, Any] = {"root": str(root)}
     if unexpected_chunks:
         lineage_metadata["unexpected_chunks"] = sorted(unexpected_chunks)
+    if missing_dict_fp:
+        lineage_metadata["is_unverified_dictionary"] = True
 
     if not verify_chunks:
         return DatasetLineage(
@@ -463,7 +495,7 @@ def load_dataset_lineage(
         chunk_checksums=actual_chunk_checksums,
         format=format_type,
         schema_version=schema_version,
-        is_verified=True,
+        is_verified=not missing_dict_fp,
         metadata=lineage_metadata,
     )
 

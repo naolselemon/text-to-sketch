@@ -357,14 +357,14 @@ def main() -> int:
 
         resolved_resume_path = _resolve_project_path(resume_path)
         resume_meta = load_checkpoint_metadata(resolved_resume_path)
-        if dataset_lineage is not None:
-            validate_checkpoint_compatibility(
-                resume_meta.get("lineage"),
-                dataset_lineage,
-                checkpoint_config=resume_meta.get("config"),
-                active_config=config,
-                allow_unverified=args.allow_unverified_checkpoint,
-            )
+        validate_checkpoint_compatibility(
+            resume_meta.get("lineage"),
+            dataset_lineage,
+            checkpoint_config=resume_meta.get("config"),
+            active_config=config,
+            allow_unverified=args.allow_unverified_checkpoint,
+            require_dataset=True,
+        )
 
     raw_model = build_model(config["model"])
     _load_pretrained_if_configured(raw_model, config)

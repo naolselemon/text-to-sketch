@@ -7,8 +7,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import re
 import warnings
 
+import numpy as np
 import torch
 from torch import nn
 
@@ -64,6 +66,200 @@ def load_checkpoint_metadata(
     }
 
 
+STROKE_FORMAT_NAMES = {
+    "stroke3",
+    "anime_stroke3",
+    "continuous",
+    "stroke_3",
+    "stroke-3",
+    "sketchformer_continuous",
+}
+TOKEN_FORMAT_NAMES = {
+    "tok_dict",
+    "token",
+    "tokens",
+    "anime_tok_dict",
+    "sketchformer_tok_dict",
+}
+
+
+def _validate_is_verified(val: Any, default: bool = True) -> bool:
+    """Strictly validate that is_verified is genuinely a boolean.
+
+    Accepts genuine Python booleans (bool), NumPy scalar booleans (np.bool_),
+    or zero-dimensional scalar boolean NumPy arrays (np.ndarray of dtype bool and ndim 0).
+
+    Rejects non-boolean types (e.g. strings, non-boolean integers, floats,
+    arbitrary collections or multi-element arrays) instead of loosely coercing with bool().
+
+    Raises CorruptedProvenanceError if an invalid non-boolean value is provided.
+    """
+    if val is None:
+        return default
+    if isinstance(val, (bool, np.bool_)):
+        return bool(val)
+    if isinstance(val, np.ndarray) and val.dtype == bool and val.ndim == 0:
+        return bool(val.item())
+    raise CorruptedProvenanceError(
+        f"Invalid non-boolean value for 'is_verified': {val!r} (type {type(val).__name__}). "
+        "Expected strict boolean True or False."
+    )
+
+
+def _classify_format_token(val: Any) -> str | None:
+    """Classify a candidate format string into 'stroke3' or 'tok_dict'."""
+    if val is None or not isinstance(val, (str, bytes)):
+        return None
+    s = str(val).strip().lower()
+    if not s:
+        return None
+    if s in STROKE_FORMAT_NAMES:
+        return "stroke3"
+    if s in TOKEN_FORMAT_NAMES:
+        return "tok_dict"
+
+    # Compound name matching with word delimiters or explicit suffixes
+    tokens = set(re.split(r"[-_.\s]+", s))
+    has_stroke = bool(
+        tokens & {"stroke3", "continuous"}
+        or s.endswith(("_stroke3", "-stroke3", "_continuous", "-continuous"))
+    )
+    has_token = bool(
+        tokens & {"tok_dict", "tokens"}
+        or (tokens & {"token"} and not tokens & {"count", "dim", "size", "offset", "id", "embedding"})
+    )
+
+    if has_stroke and not has_token:
+        return "stroke3"
+    if has_token and not has_stroke:
+        return "tok_dict"
+    return None
+
+
+def _resolve_dataset_format(
+    lineage_data: Mapping[str, Any] | None = None,
+    config_data: Mapping[str, Any] | None = None,
+    *,
+    is_verified: bool = True,
+) -> str | None:
+    """Resolve whether dataset format is continuous 'stroke3' or discrete 'tok_dict'.
+
+    Determines the format exclusively from:
+    1. Explicit, recognized lineage metadata ('format' key or nested metadata['format']).
+    2. Explicit, recognized configuration fields ('data.format.type', 'data.name',
+       'model.input.type', 'model.input.mode', 'model.name').
+
+    Integrity guarantees:
+    - Rejects explicit but unrecognized or unsupported formats in verified lineage with CorruptedProvenanceError.
+    - Never infers Stroke-3 solely from an empty or missing dictionary fingerprint.
+    - If lineage metadata and configuration explicitly declare conflicting formats,
+      raises IncompatibleCheckpointError.
+    - If neither lineage nor configuration establishes a recognized format:
+        * If a non-empty dictionary fingerprint is present in lineage, resolves to 'tok_dict'.
+        * If dictionary fingerprint is empty or missing and is_verified is True,
+          fails closed with CorruptedProvenanceError (ambiguous provenance).
+        * If is_verified is False, returns None (allowing unverified legacy checkpoints
+          under explicit opt-in).
+    """
+    lineage_fmt: str | None = None
+    if lineage_data is not None and isinstance(lineage_data, Mapping):
+        fmt = lineage_data.get("format")
+        if fmt is not None and str(fmt).strip():
+            f_cls = _classify_format_token(fmt)
+            if f_cls is None and is_verified:
+                raise CorruptedProvenanceError(
+                    f"Unrecognized or unsupported dataset format '{fmt}' in verified lineage metadata. "
+                    "Expected recognized format ('stroke3' or 'tok_dict')."
+                )
+            lineage_fmt = f_cls
+
+        meta = lineage_data.get("metadata")
+        if isinstance(meta, Mapping):
+            meta_fmt = meta.get("format")
+            if meta_fmt is not None and str(meta_fmt).strip():
+                m_cls = _classify_format_token(meta_fmt)
+                if m_cls is None and is_verified:
+                    raise CorruptedProvenanceError(
+                        f"Unrecognized or unsupported dataset format '{meta_fmt}' in verified lineage metadata['format']. "
+                        "Expected recognized format ('stroke3' or 'tok_dict')."
+                    )
+                if m_cls is not None:
+                    if lineage_fmt is not None and lineage_fmt != m_cls:
+                        raise IncompatibleCheckpointError(
+                            f"Conflicting dataset format declarations within lineage metadata: "
+                            f"'{fmt}' vs metadata['format']='{meta_fmt}'."
+                        )
+                    lineage_fmt = m_cls
+
+    config_fmt: str | None = None
+    if config_data is not None and isinstance(config_data, Mapping):
+        config_candidates: list[Any] = []
+        data_cfg = config_data.get("data")
+        if isinstance(data_cfg, Mapping):
+            data_fmt = data_cfg.get("format")
+            if isinstance(data_fmt, Mapping):
+                config_candidates.append(data_fmt.get("type"))
+            elif isinstance(data_fmt, str):
+                config_candidates.append(data_fmt)
+            config_candidates.append(data_cfg.get("name"))
+
+        model_cfg = config_data.get("model")
+        if isinstance(model_cfg, Mapping):
+            input_cfg = model_cfg.get("input")
+            if isinstance(input_cfg, Mapping):
+                config_candidates.append(input_cfg.get("type"))
+                config_candidates.append(input_cfg.get("mode"))
+            config_candidates.append(model_cfg.get("name"))
+
+        for cand in config_candidates:
+            c_cls = _classify_format_token(cand)
+            if c_cls is not None:
+                if config_fmt is not None and config_fmt != c_cls:
+                    raise IncompatibleCheckpointError(
+                        f"Conflicting dataset format declarations within configuration: "
+                        f"'{config_fmt}' vs '{c_cls}'."
+                    )
+                config_fmt = c_cls
+
+    # Validate cross-source conflict
+    if lineage_fmt is not None and config_fmt is not None:
+        if lineage_fmt != config_fmt:
+            raise IncompatibleCheckpointError(
+                f"Conflicting dataset format declarations: lineage declares '{lineage_fmt}', "
+                f"but configuration declares '{config_fmt}'."
+            )
+
+    resolved_fmt = lineage_fmt or config_fmt
+
+    if resolved_fmt is None:
+        dict_fp = ""
+        if lineage_data is not None and isinstance(lineage_data, Mapping):
+            dict_fp = str(lineage_data.get("dictionary_fingerprint", "")).strip()
+
+        if dict_fp:
+            resolved_fmt = "tok_dict"
+        elif is_verified:
+            raise CorruptedProvenanceError(
+                "Cannot determine dataset format for verified provenance: neither lineage metadata "
+                "nor configuration specifies a recognized format ('stroke3' or 'tok_dict'), "
+                "and no dictionary fingerprint is present."
+            )
+
+    return resolved_fmt
+
+
+def _is_stroke_lineage(
+    lineage_data: Mapping[str, Any] | None = None,
+    config_data: Mapping[str, Any] | None = None,
+) -> bool:
+    """Determine whether a lineage mapping or configuration represents continuous Stroke-3 format."""
+    try:
+        fmt = _resolve_dataset_format(lineage_data, config_data, is_verified=False)
+        return fmt == "stroke3"
+    except (CorruptedProvenanceError, IncompatibleCheckpointError):
+        raise
+
+
 def save_checkpoint(
     path: str | Path,
     model: nn.Module,
@@ -89,12 +285,25 @@ def save_checkpoint(
             lineage_dict = dict(lineage)
 
         if lineage_dict:
-            required_provenance = ["build_id", "dictionary_fingerprint", "dataset_fingerprint"]
-            missing_prov = [k for k in required_provenance if not str(lineage_dict.get(k, "")).strip()]
-            if missing_prov:
-                raise CorruptedProvenanceError(
-                    f"Cannot save checkpoint with incomplete lineage metadata: missing {missing_prov}"
-                )
+            is_verified = _validate_is_verified(lineage_dict.get("is_verified", True), default=True)
+            resolved_fmt = _resolve_dataset_format(
+                lineage_dict,
+                config,
+                is_verified=is_verified,
+            )
+            is_stroke = (resolved_fmt == "stroke3")
+            if resolved_fmt and not str(lineage_dict.get("format", "")).strip():
+                lineage_dict["format"] = resolved_fmt
+
+            if is_verified:
+                required_provenance = ["build_id", "dataset_fingerprint"]
+                if not is_stroke:
+                    required_provenance.append("dictionary_fingerprint")
+                missing_prov = [k for k in required_provenance if not str(lineage_dict.get(k, "")).strip()]
+                if missing_prov:
+                    raise CorruptedProvenanceError(
+                        f"Cannot save checkpoint with incomplete lineage metadata: missing {missing_prov}"
+                    )
 
     payload: dict[str, Any] = {
         "model": model.state_dict(),
@@ -158,6 +367,7 @@ def validate_checkpoint_compatibility(
     active_config: Mapping[str, Any] | None = None,
     split: str | None = None,
     allow_unverified: bool = False,
+    require_dataset: bool = False,
 ) -> bool:
     """Validate that a checkpoint matches the active dataset lineage and model configuration.
 
@@ -168,6 +378,8 @@ def validate_checkpoint_compatibility(
         active_config: Current configuration mapping for evaluation or export.
         split: Optional split name ("train", "valid", "test") to verify specifically.
         allow_unverified: If True, permit legacy checkpoints without provenance metadata.
+        require_dataset: If True, enforce that the active dataset has verified lineage metadata;
+            rejects missing dataset lineage with UnverifiedCheckpointError unless allow_unverified is True.
 
     Returns:
         True if compatible or permitted by allow_unverified.
@@ -184,7 +396,17 @@ def validate_checkpoint_compatibility(
         elif isinstance(checkpoint_lineage, Mapping):
             ckpt_lin = dict(checkpoint_lineage)
 
+    ckpt_is_stroke = False
+    ckpt_fmt: str | None = None
     if not ckpt_lin:
+        # Checkpoint lacks lineage metadata: attempt to resolve format from checkpoint configuration
+        ckpt_fmt = _resolve_dataset_format(
+            None,
+            checkpoint_config,
+            is_verified=False,
+        )
+        ckpt_is_stroke = (ckpt_fmt == "stroke3")
+
         if not allow_unverified:
             raise UnverifiedCheckpointError(
                 "Checkpoint lacks dataset lineage and provenance metadata. "
@@ -196,24 +418,112 @@ def validate_checkpoint_compatibility(
             stacklevel=2,
         )
     else:
-        # Checkpoint declared provenance: verify it is complete and uncorrupted
-        required_provenance = ["build_id", "dictionary_fingerprint", "dataset_fingerprint"]
-        missing_provenance = [k for k in required_provenance if not str(ckpt_lin.get(k, "")).strip()]
-        if missing_provenance:
-            raise CorruptedProvenanceError(
-                f"Checkpoint has incomplete or corrupted provenance metadata: missing {missing_provenance}. "
-                "Corrupted provenance cannot be bypassed with --allow-unverified-checkpoint."
+        # Checkpoint declared provenance: verify format and verification status
+        ckpt_is_verified = _validate_is_verified(ckpt_lin.get("is_verified", True), default=True)
+        ckpt_fmt = _resolve_dataset_format(
+            ckpt_lin,
+            checkpoint_config,
+            is_verified=ckpt_is_verified,
+        )
+        ckpt_is_stroke = (ckpt_fmt == "stroke3")
+
+        if not ckpt_is_verified:
+            if not allow_unverified:
+                raise UnverifiedCheckpointError(
+                    "Checkpoint has unverified dataset lineage. "
+                    "Pass --allow-unverified-checkpoint to bypass verification."
+                )
+            warnings.warn(
+                "Checkpoint has unverified dataset lineage; continuing because unverified checkpoints are allowed.",
+                UserWarning,
+                stacklevel=2,
+            )
+        else:
+            required_provenance = ["build_id", "dataset_fingerprint"]
+            if not ckpt_is_stroke:
+                required_provenance.append("dictionary_fingerprint")
+            missing_provenance = [k for k in required_provenance if not str(ckpt_lin.get(k, "")).strip()]
+            if missing_provenance:
+                raise CorruptedProvenanceError(
+                    f"Checkpoint has incomplete or corrupted provenance metadata: missing {missing_provenance}. "
+                    "Corrupted provenance cannot be bypassed with --allow-unverified-checkpoint."
+                )
+
+    ds_lin: dict[str, Any] = {}
+    if dataset_lineage is not None:
+        if hasattr(dataset_lineage, "to_dict"):
+            ds_lin = dataset_lineage.to_dict()
+        elif isinstance(dataset_lineage, Mapping):
+            ds_lin = dict(dataset_lineage)
+
+    ds_is_stroke = False
+    ds_fmt: str | None = None
+    if not ds_lin:
+        # Active dataset lacks lineage metadata: attempt to resolve format from active configuration
+        ds_fmt = _resolve_dataset_format(
+            None,
+            active_config,
+            is_verified=False,
+        )
+        ds_is_stroke = (ds_fmt == "stroke3")
+
+        if require_dataset:
+            if not allow_unverified:
+                raise UnverifiedCheckpointError(
+                    "Active dataset lacks verified lineage metadata (meta.npz not found or missing provenance). "
+                    "Pass --allow-unverified-checkpoint to bypass verification for unverified datasets."
+                )
+            warnings.warn(
+                "Active dataset lacks verified lineage metadata; continuing because unverified checkpoints are allowed.",
+                UserWarning,
+                stacklevel=2,
+            )
+    else:
+        ds_is_verified = _validate_is_verified(ds_lin.get("is_verified", True), default=True)
+        ds_fmt = _resolve_dataset_format(
+            ds_lin,
+            active_config,
+            is_verified=ds_is_verified,
+        )
+        ds_is_stroke = (ds_fmt == "stroke3")
+
+        if not ds_is_verified:
+            if not allow_unverified:
+                raise UnverifiedCheckpointError(
+                    "Active dataset lineage is unverified. "
+                    "Pass --allow-unverified-checkpoint to bypass verification for unverified datasets."
+                )
+            warnings.warn(
+                "Active dataset lineage is unverified; continuing because unverified datasets are allowed.",
+                UserWarning,
+                stacklevel=2,
+            )
+        else:
+            required_ds_prov = ["build_id", "dataset_fingerprint"]
+            if not ds_is_stroke:
+                required_ds_prov.append("dictionary_fingerprint")
+            missing_ds_prov = [k for k in required_ds_prov if not str(ds_lin.get(k, "")).strip()]
+            if missing_ds_prov:
+                raise CorruptedProvenanceError(
+                    f"Active dataset has incomplete or corrupted provenance metadata: missing {missing_ds_prov}. "
+                    "Corrupted provenance cannot be bypassed with --allow-unverified-checkpoint."
+                )
+
+    # Cross-format conflict check: runs whenever both formats are known,
+    # even if lineage is missing on either or both sides!
+    if ckpt_fmt is not None and ds_fmt is not None:
+        if ckpt_is_stroke != ds_is_stroke:
+            ckpt_fmt_name = "stroke" if ckpt_is_stroke else "token"
+            ds_fmt_name = "stroke" if ds_is_stroke else "token"
+            raise IncompatibleCheckpointError(
+                f"Dataset format mismatch: checkpoint was trained on {ckpt_fmt_name} dataset, "
+                f"but target dataset is {ds_fmt_name} format."
             )
 
-        ds_lin: dict[str, Any] = {}
-        if dataset_lineage is not None:
-            if hasattr(dataset_lineage, "to_dict"):
-                ds_lin = dataset_lineage.to_dict()
-            elif isinstance(dataset_lineage, Mapping):
-                ds_lin = dict(dataset_lineage)
+    if ckpt_lin and ds_lin:
 
-        if ds_lin:
-            # 1. Token dictionary fingerprint verification
+        # 1. Token dictionary fingerprint verification
+        if not ckpt_is_stroke and not ds_is_stroke:
             ckpt_dict_fp = str(ckpt_lin.get("dictionary_fingerprint", "")).strip()
             ds_dict_fp = str(ds_lin.get("dictionary_fingerprint", "")).strip()
             if ckpt_dict_fp and ds_dict_fp and ckpt_dict_fp != ds_dict_fp:
@@ -222,42 +532,56 @@ def validate_checkpoint_compatibility(
                     f"but target dataset uses '{ds_dict_fp}'."
                 )
 
-            # 2. Dataset build ID verification
-            ckpt_build = str(ckpt_lin.get("build_id", "")).strip()
-            ds_build = str(ds_lin.get("build_id", "")).strip()
-            if ckpt_build and ds_build and ckpt_build != ds_build:
-                raise IncompatibleCheckpointError(
-                    f"Dataset build_id mismatch: checkpoint was trained on build '{ckpt_build}', "
-                    f"but target dataset is build '{ds_build}'."
-                )
+        # 2. Dataset build ID verification
+        ckpt_build = str(ckpt_lin.get("build_id", "")).strip()
+        ds_build = str(ds_lin.get("build_id", "")).strip()
+        if ckpt_build and ds_build and ckpt_build != ds_build:
+            raise IncompatibleCheckpointError(
+                f"Dataset build_id mismatch: checkpoint was trained on build '{ckpt_build}', "
+                f"but target dataset is build '{ds_build}'."
+            )
 
-            # 3. Overall dataset fingerprint verification
-            ckpt_ds_fp = str(ckpt_lin.get("dataset_fingerprint", "")).strip()
-            ds_ds_fp = str(ds_lin.get("dataset_fingerprint", "")).strip()
-            if ckpt_ds_fp and ds_ds_fp and ckpt_ds_fp != ds_ds_fp:
-                raise IncompatibleCheckpointError(
-                    f"Dataset fingerprint mismatch: checkpoint was trained on dataset '{ckpt_ds_fp}', "
-                    f"but target dataset fingerprint is '{ds_ds_fp}'."
-                )
+        # 3. Overall dataset fingerprint verification
+        ckpt_ds_fp = str(ckpt_lin.get("dataset_fingerprint", "")).strip()
+        ds_ds_fp = str(ds_lin.get("dataset_fingerprint", "")).strip()
+        if ckpt_ds_fp and ds_ds_fp and ckpt_ds_fp != ds_ds_fp:
+            raise IncompatibleCheckpointError(
+                f"Dataset fingerprint mismatch: checkpoint was trained on dataset '{ckpt_ds_fp}', "
+                f"but target dataset fingerprint is '{ds_ds_fp}'."
+            )
 
-            # 4. Split hash verification
-            ckpt_splits = ckpt_lin.get("split_hashes", {})
-            ds_splits = ds_lin.get("split_hashes", {})
-            if split:
-                if split in ckpt_splits and split in ds_splits:
-                    if ckpt_splits[split] != ds_splits[split]:
+        # 4. Split hash verification
+        ckpt_splits = ckpt_lin.get("split_hashes") or {}
+        ds_splits = ds_lin.get("split_hashes") or {}
+        if split:
+            if ckpt_is_verified and ds_is_verified:
+                if split not in ckpt_splits:
+                    raise IncompatibleCheckpointError(
+                        f"Requested evaluation split '{split}' is missing from checkpoint lineage split_hashes."
+                    )
+                if split not in ds_splits:
+                    raise IncompatibleCheckpointError(
+                        f"Requested evaluation split '{split}' is missing from active dataset lineage split_hashes."
+                    )
+                if ckpt_splits[split] != ds_splits[split]:
+                    raise IncompatibleCheckpointError(
+                        f"Dataset split '{split}' hash mismatch: checkpoint has '{ckpt_splits[split]}', "
+                        f"but target dataset has '{ds_splits[split]}'."
+                    )
+            elif split in ckpt_splits and split in ds_splits:
+                if ckpt_splits[split] != ds_splits[split]:
+                    raise IncompatibleCheckpointError(
+                        f"Dataset split '{split}' hash mismatch: checkpoint has '{ckpt_splits[split]}', "
+                        f"but target dataset has '{ds_splits[split]}'."
+                    )
+        else:
+            for s in ("train", "valid", "test"):
+                if s in ckpt_splits and s in ds_splits:
+                    if ckpt_splits[s] != ds_splits[s]:
                         raise IncompatibleCheckpointError(
-                            f"Dataset split '{split}' hash mismatch: checkpoint has '{ckpt_splits[split]}', "
-                            f"but target dataset has '{ds_splits[split]}'."
+                            f"Dataset split '{s}' hash mismatch: checkpoint has '{ckpt_splits[s]}', "
+                            f"but target dataset has '{ds_splits[s]}'."
                         )
-            else:
-                for s in ("train", "valid", "test"):
-                    if s in ckpt_splits and s in ds_splits:
-                        if ckpt_splits[s] != ds_splits[s]:
-                            raise IncompatibleCheckpointError(
-                                f"Dataset split '{s}' hash mismatch: checkpoint has '{ckpt_splits[s]}', "
-                                f"but target dataset has '{ds_splits[s]}'."
-                            )
 
     if checkpoint_config and active_config:
         try:

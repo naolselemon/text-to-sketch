@@ -1668,8 +1668,1272 @@ class ProvenanceLineageTest(unittest.TestCase):
             )
         self.assertIn("classification.enabled", str(cm.exception))
 
+    def test_29_finding1_stroke3_checkpoint_saving_and_token_provenance(self):
+        """Test Finding 1: Stroke-3 lineage saves checkpoints without dictionary_fingerprint, while token requires it."""
+        model = DummyModel(dim=16)
+
+        # 1. Verified anime_stroke3 lineage with empty dictionary_fingerprint saves successfully
+        stroke3_lineage = {
+            "build_id": "stroke3_bld_1",
+            "dataset_fingerprint": "stroke3_ds_fp_1",
+            "dictionary_fingerprint": "",
+            "format": "anime_stroke3",
+            "is_verified": True,
+        }
+        ckpt_path = save_checkpoint(
+            self.root / "stroke3_ckpt.pt",
+            model,
+            lineage=stroke3_lineage,
+        )
+        self.assertTrue(ckpt_path.is_file())
+        meta = load_checkpoint_metadata(ckpt_path)
+        self.assertEqual(meta["lineage"]["format"], "anime_stroke3")
+        self.assertEqual(meta["lineage"]["dictionary_fingerprint"], "")
+
+        # Also works for format="stroke3"
+        stroke3_std = dict(stroke3_lineage, format="stroke3")
+        ckpt_std = save_checkpoint(self.root / "stroke3_std.pt", model, lineage=stroke3_std)
+        self.assertTrue(ckpt_std.is_file())
+
+        # Stroke-3 compatibility validation succeeds with empty dictionary fingerprint
+        self.assertTrue(
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=stroke3_lineage,
+                dataset_lineage=stroke3_lineage,
+            )
+        )
+
+        # 2. Verified token-based lineage with missing dictionary fingerprint is rejected
+        token_missing_dict = {
+            "build_id": "tok_bld_1",
+            "dataset_fingerprint": "tok_ds_fp_1",
+            "dictionary_fingerprint": "",
+            "format": "tok_dict",
+            "is_verified": True,
+        }
+        with self.assertRaises(CorruptedProvenanceError) as cm:
+            save_checkpoint(self.root / "invalid_tok.pt", model, lineage=token_missing_dict)
+        self.assertIn("dictionary_fingerprint", str(cm.exception))
+
+        with self.assertRaises(CorruptedProvenanceError) as cm:
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=token_missing_dict,
+                dataset_lineage=token_missing_dict,
+            )
+        self.assertIn("dictionary_fingerprint", str(cm.exception))
+
+        # 3. Verified token-based lineage with valid dictionary fingerprint can save a checkpoint and validate
+        token_valid = {
+            "build_id": "tok_bld_1",
+            "dataset_fingerprint": "tok_ds_fp_1",
+            "dictionary_fingerprint": "tok_dict_fp_valid",
+            "format": "tok_dict",
+            "is_verified": True,
+        }
+        ckpt_tok = save_checkpoint(self.root / "valid_tok.pt", model, lineage=token_valid)
+        self.assertTrue(ckpt_tok.is_file())
+        self.assertTrue(
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=token_valid,
+                dataset_lineage=token_valid,
+            )
+        )
+
+        # 4. Stroke-3 checkpoint cannot be evaluated against a token dataset
+        with self.assertRaises(IncompatibleCheckpointError) as cm:
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=stroke3_lineage,
+                dataset_lineage=token_valid,
+            )
+        self.assertIn("Dataset format mismatch", str(cm.exception))
+
+        # And vice-versa: Token checkpoint cannot be evaluated against a Stroke-3 dataset
+        with self.assertRaises(IncompatibleCheckpointError) as cm:
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=token_valid,
+                dataset_lineage=stroke3_lineage,
+            )
+        self.assertIn("Dataset format mismatch", str(cm.exception))
+
+        # 5. Stroke-3 lineage without explicit format key in lineage dict derives format from config or empty dict_fp
+        stroke_inferred = {
+            "build_id": "s3_inf_bld",
+            "dataset_fingerprint": "s3_inf_ds",
+            "dictionary_fingerprint": "",
+            "is_verified": True,
+        }
+        cfg_s3 = {
+            "data": {"format": {"type": "stroke3"}},
+            "model": {"input": {"type": "stroke3"}},
+        }
+        ckpt_inf = save_checkpoint(
+            self.root / "inferred_s3.pt",
+            model,
+            config=cfg_s3,
+            lineage=stroke_inferred,
+        )
+        self.assertTrue(ckpt_inf.is_file())
+        meta_inf = load_checkpoint_metadata(ckpt_inf)
+        self.assertEqual(meta_inf["lineage"]["format"], "stroke3")
+        self.assertTrue(
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=meta_inf["lineage"],
+                dataset_lineage=stroke_inferred,
+                checkpoint_config=cfg_s3,
+                active_config=cfg_s3,
+            )
+        )
+
+        # 6. Corrupted or incomplete required provenance is still rejected
+        stroke_missing_build = {
+            "dataset_fingerprint": "stroke3_ds_fp_1",
+            "format": "stroke3",
+            "is_verified": True,
+        }
+        with self.assertRaises(CorruptedProvenanceError):
+            save_checkpoint(self.root / "corrupted_stroke.pt", model, lineage=stroke_missing_build)
+
+    def test_30_finding2_resume_validation_fail_closed_without_dataset_lineage(self):
+        """Test Finding 2: Resume validation fails closed when dataset metadata is absent."""
+        valid_lineage = {
+            "build_id": "bld_res_1",
+            "dataset_fingerprint": "ds_res_fp_1",
+            "dictionary_fingerprint": "dict_res_fp_1",
+            "format": "tok_dict",
+            "is_verified": True,
+        }
+        cfg = {"model": {"name": "sketchformer_tok_dict"}}
+
+        # 1. Resuming a verified checkpoint against a verified compatible dataset succeeds
+        self.assertTrue(
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=valid_lineage,
+                dataset_lineage=valid_lineage,
+                checkpoint_config=cfg,
+                active_config=cfg,
+            )
+        )
+
+        # 2. Resuming a lineage-free checkpoint against a dataset without meta.npz fails by default
+        with self.assertRaises(UnverifiedCheckpointError) as cm:
+            validate_checkpoint_compatibility(
+                checkpoint_lineage={},
+                dataset_lineage=None,
+                allow_unverified=False,
+            )
+        self.assertIn("Checkpoint lacks dataset lineage", str(cm.exception))
+
+        # 3. Resuming a verified checkpoint when the active dataset has no lineage fails by default
+        with self.assertRaises(UnverifiedCheckpointError) as cm:
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=valid_lineage,
+                dataset_lineage=None,
+                allow_unverified=False,
+                require_dataset=True,
+            )
+        self.assertIn("Active dataset lacks verified lineage metadata", str(cm.exception))
+
+        # 4. Resuming with genuinely unavailable provenance succeeds only with the explicit opt-in
+        with warnings.catch_warnings(record=True) as ws:
+            warnings.simplefilter("always")
+            res = validate_checkpoint_compatibility(
+                checkpoint_lineage=valid_lineage,
+                dataset_lineage=None,
+                checkpoint_config=cfg,
+                active_config=cfg,
+                allow_unverified=True,
+                require_dataset=True,
+            )
+            self.assertTrue(res)
+            self.assertTrue(any("Active dataset lacks verified lineage metadata" in str(w.message) for w in ws))
+
+        # 5. Known architecture or dataset mismatches still fail even when the opt-in flag is provided
+        mismatched_cfg = {"model": {"name": "different_model_arch"}}
+        with self.assertRaises(IncompatibleCheckpointError):
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=valid_lineage,
+                dataset_lineage=None,
+                checkpoint_config=cfg,
+                active_config=mismatched_cfg,
+                allow_unverified=True,
+                require_dataset=True,
+            )
+        mismatched_lineage = dict(valid_lineage, dataset_fingerprint="other_ds_fp")
+        with self.assertRaises(IncompatibleCheckpointError):
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=valid_lineage,
+                dataset_lineage=mismatched_lineage,
+                allow_unverified=True,
+            )
+
+        # 6. Corrupted provenance cannot be bypassed with the opt-in flag
+        corrupted = {"build_id": "b1"}
+        with self.assertRaises(CorruptedProvenanceError):
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=corrupted,
+                dataset_lineage=valid_lineage,
+                allow_unverified=True,
+            )
+
+    def test_31_finding3_token_dataset_unverified_invariance(self):
+        """Test Finding 3: Token dataset unverified state remains invariant and cannot be promoted."""
+        ds_dir = self.root / "tok_ds_invariance"
+        ds_dir.mkdir(parents=True, exist_ok=True)
+        train_file = ds_dir / "train_000.npz"
+        valid_file = ds_dir / "valid.npz"
+        test_file = ds_dir / "test.npz"
+        np.savez_compressed(train_file, x=np.asarray([[1, 2, 3]]), y=np.asarray([0]), sample_ids=np.asarray(["tok_s1"]))
+        np.savez_compressed(valid_file, x=np.asarray([[1, 2, 3]]), y=np.asarray([0]), sample_ids=np.asarray(["tok_v1"]))
+        np.savez_compressed(test_file, x=np.asarray([[1, 2, 3]]), y=np.asarray([0]), sample_ids=np.asarray(["tok_t1"]))
+
+        ck_map = {
+            "train_000.npz": compute_chunk_checksum(train_file),
+            "valid.npz": compute_chunk_checksum(valid_file),
+            "test.npz": compute_chunk_checksum(test_file),
+        }
+        split_hashes = {
+            "train": compute_split_hash(["tok_s1"]),
+            "valid": compute_split_hash(["tok_v1"]),
+            "test": compute_split_hash(["tok_t1"]),
+        }
+        split_counts = {"train": 1, "valid": 1, "test": 1}
+
+        # 1. A token dataset with a valid dictionary fingerprint can load as verified
+        fp_verified = compute_dataset_fingerprint(
+            build_id="tok_inv_bld",
+            dictionary_fingerprint="dict_fp_valid_123",
+            split_hashes=split_hashes,
+            split_counts=split_counts,
+            train_chunks=["train_000.npz"],
+            valid_chunks=["valid.npz"],
+            test_chunks=["test.npz"],
+            chunk_checksums=ck_map,
+            format_type="tok_dict",
+            schema_version=2,
+        )
+        np.savez(
+            ds_dir / "meta.npz",
+            build_id="tok_inv_bld",
+            dictionary_fingerprint="dict_fp_valid_123",
+            dataset_fingerprint=fp_verified,
+            split_hash_train=split_hashes["train"],
+            split_hash_valid=split_hashes["valid"],
+            split_hash_test=split_hashes["test"],
+            chunk_checksums=json.dumps(ck_map),
+            train_chunks=np.asarray(["train_000.npz"]),
+            train_chunk_counts=np.asarray([1]),
+            valid_chunks=np.asarray(["valid.npz"]),
+            valid_chunk_counts=np.asarray([1]),
+            test_chunks=np.asarray(["test.npz"]),
+            test_chunk_counts=np.asarray([1]),
+            n_samples_train=1,
+            n_samples_valid=1,
+            n_samples_test=1,
+            is_published=True,
+            format="tok_dict",
+            schema_version=2,
+        )
+        lin_verified = load_dataset_lineage(ds_dir, verify_chunks=True)
+        self.assertTrue(lin_verified.is_verified)
+        self.assertEqual(lin_verified.dictionary_fingerprint, "dict_fp_valid_123")
+
+        # 2. A token dataset with a missing dictionary fingerprint fails without explicit opt-in
+        fp_unverified = compute_dataset_fingerprint(
+            build_id="tok_inv_bld",
+            dictionary_fingerprint="",
+            split_hashes=split_hashes,
+            split_counts=split_counts,
+            train_chunks=["train_000.npz"],
+            valid_chunks=["valid.npz"],
+            test_chunks=["test.npz"],
+            chunk_checksums=ck_map,
+            format_type="tok_dict",
+            schema_version=2,
+        )
+        np.savez(
+            ds_dir / "meta.npz",
+            build_id="tok_inv_bld",
+            dictionary_fingerprint="",
+            dataset_fingerprint=fp_unverified,
+            split_hash_train=split_hashes["train"],
+            split_hash_valid=split_hashes["valid"],
+            split_hash_test=split_hashes["test"],
+            chunk_checksums=json.dumps(ck_map),
+            train_chunks=np.asarray(["train_000.npz"]),
+            train_chunk_counts=np.asarray([1]),
+            valid_chunks=np.asarray(["valid.npz"]),
+            valid_chunk_counts=np.asarray([1]),
+            test_chunks=np.asarray(["test.npz"]),
+            test_chunk_counts=np.asarray([1]),
+            n_samples_train=1,
+            n_samples_valid=1,
+            n_samples_test=1,
+            is_published=True,
+            format="tok_dict",
+            schema_version=2,
+        )
+        with self.assertRaises(ValueError) as cm:
+            load_dataset_lineage(ds_dir, verify_chunks=True, allow_unverified=False)
+        self.assertIn("missing required dictionary_fingerprint", str(cm.exception))
+
+        # 3. The same dataset loads with allow_unverified=True but remains is_verified=False
+        with warnings.catch_warnings(record=True) as ws:
+            warnings.simplefilter("always")
+            lin_unverified = load_dataset_lineage(ds_dir, verify_chunks=True, allow_unverified=True)
+            self.assertFalse(lin_unverified.is_verified)
+            self.assertTrue(any("lacks verified dictionary_fingerprint" in str(w.message) for w in ws))
+
+        # 4. Its dictionary fingerprint remains empty (not fabricated)
+        self.assertEqual(lin_unverified.dictionary_fingerprint, "")
+
+        # 5. Downstream checkpoint saving preserves its unverified status
+        model = DummyModel(dim=16)
+        ckpt_unv = save_checkpoint(
+            self.root / "unverified_downstream.pt",
+            model,
+            lineage=lin_unverified,
+        )
+        loaded_unv_meta = load_checkpoint_metadata(ckpt_unv)
+        self.assertFalse(loaded_unv_meta["lineage"]["is_verified"])
+        self.assertEqual(loaded_unv_meta["lineage"]["dictionary_fingerprint"], "")
+
+        # Resuming or evaluating against this unverified dataset without allow_unverified fails
+        with self.assertRaises(UnverifiedCheckpointError):
+            validate_checkpoint_compatibility(
+                loaded_unv_meta["lineage"],
+                lin_unverified,
+                allow_unverified=False,
+            )
+        # But succeeds with explicit opt-in
+        self.assertTrue(
+            validate_checkpoint_compatibility(
+                loaded_unv_meta["lineage"],
+                lin_unverified,
+                allow_unverified=True,
+            )
+        )
+        # Even with explicit opt-in, evaluating against a dataset with mismatched fingerprints still fails
+        with self.assertRaises(IncompatibleCheckpointError):
+            validate_checkpoint_compatibility(
+                loaded_unv_meta["lineage"],
+                lin_verified,
+                allow_unverified=True,
+            )
+
+        # 6. A verified Stroke-3 dataset with no dictionary fingerprint remains valid
+        stroke3_dir = self.root / "stroke3_verified_ds"
+        stroke3_dir.mkdir(parents=True, exist_ok=True)
+        train_s3 = stroke3_dir / "train_000.npz"
+        valid_s3 = stroke3_dir / "valid.npz"
+        test_s3 = stroke3_dir / "test.npz"
+        np.savez_compressed(train_s3, x=np.asarray([[[0, 0, 1]]], dtype=object), y=np.asarray([0]), sample_ids=np.asarray(["s3_1"]))
+        np.savez_compressed(valid_s3, x=np.asarray([[[0, 0, 1]]], dtype=object), y=np.asarray([0]), sample_ids=np.asarray(["s3_2"]))
+        np.savez_compressed(test_s3, x=np.asarray([[[0, 0, 1]]], dtype=object), y=np.asarray([0]), sample_ids=np.asarray(["s3_3"]))
+        s3_ck_map = {
+            "train_000.npz": compute_chunk_checksum(train_s3),
+            "valid.npz": compute_chunk_checksum(valid_s3),
+            "test.npz": compute_chunk_checksum(test_s3),
+        }
+        s3_split_hashes = {
+            "train": compute_split_hash(["s3_1"]),
+            "valid": compute_split_hash(["s3_2"]),
+            "test": compute_split_hash(["s3_3"]),
+        }
+        s3_fp = compute_dataset_fingerprint(
+            build_id="s3_bld",
+            dictionary_fingerprint="",
+            split_hashes=s3_split_hashes,
+            split_counts={"train": 1, "valid": 1, "test": 1},
+            train_chunks=["train_000.npz"],
+            valid_chunks=["valid.npz"],
+            test_chunks=["test.npz"],
+            chunk_checksums=s3_ck_map,
+            format_type="stroke3",
+            schema_version=2,
+        )
+        np.savez(
+            stroke3_dir / "meta.npz",
+            build_id="s3_bld",
+            dictionary_fingerprint="",
+            dataset_fingerprint=s3_fp,
+            chunk_checksums=json.dumps(s3_ck_map),
+            train_chunks=np.asarray(["train_000.npz"]),
+            train_chunk_counts=np.asarray([1]),
+            valid_chunks=np.asarray(["valid.npz"]),
+            valid_chunk_counts=np.asarray([1]),
+            test_chunks=np.asarray(["test.npz"]),
+            test_chunk_counts=np.asarray([1]),
+            n_samples_train=1,
+            n_samples_valid=1,
+            n_samples_test=1,
+            is_published=True,
+            format="stroke3",
+            schema_version=2,
+        )
+        s3_lin = load_dataset_lineage(stroke3_dir, verify_chunks=True)
+        self.assertTrue(s3_lin.is_verified)
+        self.assertEqual(s3_lin.dictionary_fingerprint, "")
+
+    def test_32_fail_closed_dataset_format_detection(self):
+        """Test fail-closed dataset format detection across save_checkpoint and validate_checkpoint_compatibility.
+
+        Guarantees:
+        1. Explicit verified Stroke-3 lineage with empty dictionary fingerprint saves and validates successfully.
+        2. Explicit verified token lineage with empty dictionary fingerprint is rejected (CorruptedProvenanceError).
+        3. Verified lineage with no explicit format, empty dictionary fingerprint, and no format-identifying config
+           is rejected as ambiguous (CorruptedProvenanceError) on both save and validation.
+        4. Verified token configuration with missing dictionary fingerprint is rejected even if lineage format
+           is absent (CorruptedProvenanceError).
+        5. Explicit conflicting lineage and configuration formats are rejected (IncompatibleCheckpointError).
+        6. Explicit unverified token lineage remains unverified when saved with opt-in behavior (is_verified=False preserved).
+        """
+        model = DummyModel(dim=16)
+
+        # Case 1: Explicit verified Stroke-3 lineage with empty dictionary fingerprint saves and validates
+        stroke3_lineage = {
+            "build_id": "s3_case1_bld",
+            "dataset_fingerprint": "s3_case1_ds",
+            "dictionary_fingerprint": "",
+            "format": "stroke3",
+            "is_verified": True,
+        }
+        ckpt_case1 = save_checkpoint(
+            self.root / "case1_s3.pt",
+            model,
+            lineage=stroke3_lineage,
+        )
+        self.assertTrue(ckpt_case1.is_file())
+        meta_case1 = load_checkpoint_metadata(ckpt_case1)
+        self.assertEqual(meta_case1["lineage"]["format"], "stroke3")
+        self.assertEqual(meta_case1["lineage"]["dictionary_fingerprint"], "")
+        self.assertTrue(
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=meta_case1["lineage"],
+                dataset_lineage=stroke3_lineage,
+            )
+        )
+
+        # Case 2: Explicit verified token lineage with empty dictionary fingerprint is rejected
+        token_lineage_empty_dict = {
+            "build_id": "tok_case2_bld",
+            "dataset_fingerprint": "tok_case2_ds",
+            "dictionary_fingerprint": "",
+            "format": "tok_dict",
+            "is_verified": True,
+        }
+        with self.assertRaises(CorruptedProvenanceError) as cm_save2:
+            save_checkpoint(
+                self.root / "case2_invalid_tok.pt",
+                model,
+                lineage=token_lineage_empty_dict,
+            )
+        self.assertIn("dictionary_fingerprint", str(cm_save2.exception))
+
+        with self.assertRaises(CorruptedProvenanceError) as cm_val2:
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=token_lineage_empty_dict,
+                dataset_lineage=token_lineage_empty_dict,
+            )
+        self.assertIn("dictionary_fingerprint", str(cm_val2.exception))
+
+        # Case 3: Verified lineage with no explicit format, empty dictionary fingerprint,
+        # and no format-identifying config is rejected as ambiguous (CorruptedProvenanceError)
+        ambiguous_lineage = {
+            "build_id": "ambig_case3_bld",
+            "dataset_fingerprint": "ambig_case3_ds",
+            "dictionary_fingerprint": "",
+            "is_verified": True,
+        }
+        neutral_config = {
+            "model": {
+                "architecture": {"d_model": 16, "num_encoder_layers": 2},
+            }
+        }
+        with self.assertRaises(CorruptedProvenanceError) as cm_save3:
+            save_checkpoint(
+                self.root / "case3_ambig.pt",
+                model,
+                config=neutral_config,
+                lineage=ambiguous_lineage,
+            )
+        self.assertIn("Cannot determine dataset format", str(cm_save3.exception))
+
+        with self.assertRaises(CorruptedProvenanceError) as cm_val3:
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=ambiguous_lineage,
+                dataset_lineage=ambiguous_lineage,
+                checkpoint_config=neutral_config,
+                active_config=neutral_config,
+            )
+        self.assertIn("Cannot determine dataset format", str(cm_val3.exception))
+
+        # Case 4: Verified token configuration with missing dictionary fingerprint is rejected,
+        # even if lineage format is absent (CorruptedProvenanceError)
+        tok_config = {
+            "data": {
+                "format": {"type": "tok_dict"},
+                "name": "anime_tok_dict",
+            },
+            "model": {
+                "name": "sketchformer_tok_dict",
+            },
+        }
+        with self.assertRaises(CorruptedProvenanceError) as cm_save4:
+            save_checkpoint(
+                self.root / "case4_tok_cfg_missing_dict.pt",
+                model,
+                config=tok_config,
+                lineage=ambiguous_lineage,
+            )
+        self.assertIn("dictionary_fingerprint", str(cm_save4.exception))
+
+        with self.assertRaises(CorruptedProvenanceError) as cm_val4:
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=ambiguous_lineage,
+                dataset_lineage=ambiguous_lineage,
+                checkpoint_config=tok_config,
+                active_config=tok_config,
+            )
+        self.assertIn("dictionary_fingerprint", str(cm_val4.exception))
+
+        # Case 5: Explicit conflicting lineage and configuration formats are rejected (IncompatibleCheckpointError)
+        s3_lineage_explicit = {
+            "build_id": "s3_case5_bld",
+            "dataset_fingerprint": "s3_case5_ds",
+            "dictionary_fingerprint": "",
+            "format": "stroke3",
+            "is_verified": True,
+        }
+        with self.assertRaises(IncompatibleCheckpointError) as cm_save5:
+            save_checkpoint(
+                self.root / "case5_conflict.pt",
+                model,
+                config=tok_config,
+                lineage=s3_lineage_explicit,
+            )
+        self.assertIn("Conflicting dataset format declarations", str(cm_save5.exception))
+
+        with self.assertRaises(IncompatibleCheckpointError) as cm_val5:
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=s3_lineage_explicit,
+                dataset_lineage=s3_lineage_explicit,
+                checkpoint_config=tok_config,
+                active_config=tok_config,
+            )
+        self.assertIn("Conflicting dataset format declarations", str(cm_val5.exception))
+
+        # Case 6: Explicit unverified token lineage remains unverified when saved with opt-in behavior (is_verified=False preserved)
+        unverified_token_lineage = {
+            "build_id": "tok_case6_unv_bld",
+            "dataset_fingerprint": "tok_case6_unv_ds",
+            "dictionary_fingerprint": "",
+            "format": "tok_dict",
+            "is_verified": False,
+        }
+        ckpt_case6 = save_checkpoint(
+            self.root / "case6_unv.pt",
+            model,
+            lineage=unverified_token_lineage,
+        )
+        self.assertTrue(ckpt_case6.is_file())
+        meta_case6 = load_checkpoint_metadata(ckpt_case6)
+        self.assertFalse(meta_case6["lineage"]["is_verified"])
+        self.assertEqual(meta_case6["lineage"]["dictionary_fingerprint"], "")
+
+        # Validating without allow_unverified must be rejected
+        with self.assertRaises(UnverifiedCheckpointError):
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=meta_case6["lineage"],
+                dataset_lineage=unverified_token_lineage,
+                allow_unverified=False,
+            )
+        # Validating with allow_unverified succeeds
+        with warnings.catch_warnings(record=True) as ws:
+            warnings.simplefilter("always")
+            res6 = validate_checkpoint_compatibility(
+                checkpoint_lineage=meta_case6["lineage"],
+                dataset_lineage=unverified_token_lineage,
+                allow_unverified=True,
+            )
+            self.assertTrue(res6)
+            self.assertTrue(any("unverified" in str(w.message).lower() for w in ws))
+
+    def test_33_verified_versus_unverified_format_mismatch(self):
+        """Test format mismatch rejection across all verified vs unverified permutations."""
+        # 1. Verified Stroke-3 checkpoint vs Unverified Token dataset
+        v_stroke = {
+            "build_id": "v_s3_bld",
+            "dataset_fingerprint": "v_s3_ds",
+            "dictionary_fingerprint": "",
+            "format": "stroke3",
+            "is_verified": True,
+        }
+        u_token = {
+            "build_id": "u_tok_bld",
+            "dataset_fingerprint": "u_tok_ds",
+            "dictionary_fingerprint": "",
+            "format": "tok_dict",
+            "is_verified": False,
+        }
+        # Without allow_unverified, rejects because dataset is unverified
+        with self.assertRaises(UnverifiedCheckpointError):
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=v_stroke,
+                dataset_lineage=u_token,
+                allow_unverified=False,
+            )
+        # Even with allow_unverified=True, format mismatch is strictly rejected
+        with self.assertRaises(IncompatibleCheckpointError) as cm:
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=v_stroke,
+                dataset_lineage=u_token,
+                allow_unverified=True,
+            )
+        self.assertIn("Dataset format mismatch", str(cm.exception))
+
+        # 2. Unverified Token checkpoint vs Verified Stroke-3 dataset
+        with self.assertRaises(UnverifiedCheckpointError):
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=u_token,
+                dataset_lineage=v_stroke,
+                allow_unverified=False,
+            )
+        with self.assertRaises(IncompatibleCheckpointError) as cm:
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=u_token,
+                dataset_lineage=v_stroke,
+                allow_unverified=True,
+            )
+        self.assertIn("Dataset format mismatch", str(cm.exception))
+
+        # 3. Verified Token checkpoint vs Unverified Stroke-3 dataset
+        v_token = {
+            "build_id": "v_tok_bld",
+            "dataset_fingerprint": "v_tok_ds",
+            "dictionary_fingerprint": "v_tok_dict_fp",
+            "format": "tok_dict",
+            "is_verified": True,
+        }
+        u_stroke = {
+            "build_id": "u_s3_bld",
+            "dataset_fingerprint": "u_s3_ds",
+            "dictionary_fingerprint": "",
+            "format": "stroke3",
+            "is_verified": False,
+        }
+        with self.assertRaises(UnverifiedCheckpointError):
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=v_token,
+                dataset_lineage=u_stroke,
+                allow_unverified=False,
+            )
+        with self.assertRaises(IncompatibleCheckpointError) as cm:
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=v_token,
+                dataset_lineage=u_stroke,
+                allow_unverified=True,
+            )
+        self.assertIn("Dataset format mismatch", str(cm.exception))
+
+        # 4. Unverified Stroke-3 checkpoint vs Verified Token dataset
+        with self.assertRaises(UnverifiedCheckpointError):
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=u_stroke,
+                dataset_lineage=v_token,
+                allow_unverified=False,
+            )
+        with self.assertRaises(IncompatibleCheckpointError) as cm:
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=u_stroke,
+                dataset_lineage=v_token,
+                allow_unverified=True,
+            )
+        self.assertIn("Dataset format mismatch", str(cm.exception))
+
+        # 5. Unverified Stroke-3 checkpoint vs Unverified Token dataset (both unverified)
+        with self.assertRaises(IncompatibleCheckpointError) as cm:
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=u_stroke,
+                dataset_lineage=u_token,
+                allow_unverified=True,
+            )
+        self.assertIn("Dataset format mismatch", str(cm.exception))
+
+    def test_34_strict_boolean_validation_for_is_verified(self):
+        """Test strict boolean validation for is_verified, rejecting strings, numbers, and collections."""
+        model = DummyModel(dim=16)
+        base_lineage = {
+            "build_id": "strict_bld",
+            "dataset_fingerprint": "strict_ds",
+            "dictionary_fingerprint": "",
+            "format": "stroke3",
+        }
+
+        # 1. Non-boolean string "false" raises CorruptedProvenanceError
+        with self.assertRaises(CorruptedProvenanceError) as cm:
+            save_checkpoint(
+                self.root / "bad_bool_str_false.pt",
+                model,
+                lineage=dict(base_lineage, is_verified="false"),
+            )
+        self.assertIn("Invalid non-boolean value for 'is_verified'", str(cm.exception))
+
+        # 2. Non-boolean string "true" raises CorruptedProvenanceError
+        with self.assertRaises(CorruptedProvenanceError) as cm:
+            save_checkpoint(
+                self.root / "bad_bool_str_true.pt",
+                model,
+                lineage=dict(base_lineage, is_verified="true"),
+            )
+        self.assertIn("Invalid non-boolean value for 'is_verified'", str(cm.exception))
+
+        # 3. Non-boolean string "invalid" raises CorruptedProvenanceError
+        with self.assertRaises(CorruptedProvenanceError) as cm:
+            save_checkpoint(
+                self.root / "bad_bool_str.pt",
+                model,
+                lineage=dict(base_lineage, is_verified="invalid"),
+            )
+        self.assertIn("Invalid non-boolean value for 'is_verified'", str(cm.exception))
+
+        # 4. Non-boolean integer 0 or 1 raises CorruptedProvenanceError
+        with self.assertRaises(CorruptedProvenanceError) as cm:
+            save_checkpoint(
+                self.root / "bad_bool_int0.pt",
+                model,
+                lineage=dict(base_lineage, is_verified=0),
+            )
+        self.assertIn("Invalid non-boolean value for 'is_verified'", str(cm.exception))
+
+        with self.assertRaises(CorruptedProvenanceError) as cm:
+            save_checkpoint(
+                self.root / "bad_bool_int1.pt",
+                model,
+                lineage=dict(base_lineage, is_verified=1),
+            )
+        self.assertIn("Invalid non-boolean value for 'is_verified'", str(cm.exception))
+
+        # 5. Non-boolean collection / multi-element array raises CorruptedProvenanceError
+        with self.assertRaises(CorruptedProvenanceError) as cm:
+            save_checkpoint(
+                self.root / "bad_bool_list.pt",
+                model,
+                lineage=dict(base_lineage, is_verified=[True]),
+            )
+        self.assertIn("Invalid non-boolean value for 'is_verified'", str(cm.exception))
+
+        # 1-D numpy array [True] is a collection, not a scalar boolean, and must be rejected
+        with self.assertRaises(CorruptedProvenanceError) as cm:
+            save_checkpoint(
+                self.root / "bad_bool_1d_arr.pt",
+                model,
+                lineage=dict(base_lineage, is_verified=np.array([True])),
+            )
+        self.assertIn("Invalid non-boolean value for 'is_verified'", str(cm.exception))
+
+        # 6. validate_checkpoint_compatibility rejects non-boolean is_verified in checkpoint
+        with self.assertRaises(CorruptedProvenanceError) as cm:
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=dict(base_lineage, is_verified="False"),
+                dataset_lineage=dict(base_lineage, is_verified=True),
+            )
+        self.assertIn("Invalid non-boolean value for 'is_verified'", str(cm.exception))
+
+        with self.assertRaises(CorruptedProvenanceError) as cm:
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=dict(base_lineage, is_verified=np.array([False])),
+                dataset_lineage=dict(base_lineage, is_verified=True),
+            )
+        self.assertIn("Invalid non-boolean value for 'is_verified'", str(cm.exception))
+
+        # 7. validate_checkpoint_compatibility rejects non-boolean is_verified in dataset
+        with self.assertRaises(CorruptedProvenanceError) as cm:
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=dict(base_lineage, is_verified=True),
+                dataset_lineage=dict(base_lineage, is_verified="True"),
+            )
+        self.assertIn("Invalid non-boolean value for 'is_verified'", str(cm.exception))
+
+        with self.assertRaises(CorruptedProvenanceError) as cm:
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=dict(base_lineage, is_verified=True),
+                dataset_lineage=dict(base_lineage, is_verified=np.array([True])),
+            )
+        self.assertIn("Invalid non-boolean value for 'is_verified'", str(cm.exception))
+
+        # 8. DatasetLineage.from_dict rejects non-boolean is_verified with ValueError
+        with self.assertRaises(ValueError) as cm:
+            DatasetLineage.from_dict({"is_verified": "false"})
+        self.assertIn("Invalid non-boolean value for 'is_verified'", str(cm.exception))
+
+        with self.assertRaises(ValueError) as cm:
+            DatasetLineage.from_dict({"is_verified": 0})
+        self.assertIn("Invalid non-boolean value for 'is_verified'", str(cm.exception))
+
+        with self.assertRaises(ValueError) as cm:
+            DatasetLineage.from_dict({"is_verified": np.array([True])})
+        self.assertIn("Invalid non-boolean value for 'is_verified'", str(cm.exception))
+
+        # 9. Genuine booleans succeed (Python bool, np.bool_, and 0-D scalar numpy array)
+        self.assertTrue(save_checkpoint(
+            self.root / "good_bool_py.pt",
+            model,
+            lineage=dict(base_lineage, is_verified=True),
+        ).is_file())
+        self.assertTrue(save_checkpoint(
+            self.root / "good_bool_np.pt",
+            model,
+            lineage=dict(base_lineage, is_verified=np.bool_(True)),
+        ).is_file())
+        self.assertTrue(save_checkpoint(
+            self.root / "good_bool_0d_arr.pt",
+            model,
+            lineage=dict(base_lineage, is_verified=np.array(True)),
+        ).is_file())
+        lin_from_dict = DatasetLineage.from_dict({"is_verified": False})
+        self.assertFalse(lin_from_dict.is_verified)
+        lin_from_dict_np = DatasetLineage.from_dict({"is_verified": np.array(False)})
+        self.assertFalse(lin_from_dict_np.is_verified)
+
+    def test_35_missing_lineage_format_compatibility_and_opt_in(self):
+        """Test missing-lineage format resolution, cross-format rejection, and legacy opt-in."""
+        v_stroke_lineage = {
+            "build_id": "v_s3_bld",
+            "dataset_fingerprint": "v_s3_ds_fp",
+            "dictionary_fingerprint": "",
+            "format": "stroke3",
+            "is_verified": True,
+        }
+        v_token_lineage = {
+            "build_id": "v_tok_bld",
+            "dataset_fingerprint": "v_tok_ds_fp",
+            "dictionary_fingerprint": "v_tok_dict_fp",
+            "format": "tok_dict",
+            "is_verified": True,
+        }
+        token_config = {"data": {"format": {"type": "tok_dict"}}}
+        stroke_config = {"data": {"format": {"type": "stroke3"}}}
+
+        # Case 1: Verified Stroke-3 ckpt + missing active dataset lineage + active config identifying tok_dict + allow_unverified=True -> reject (IncompatibleCheckpointError)
+        with self.assertRaises(IncompatibleCheckpointError) as cm:
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=v_stroke_lineage,
+                dataset_lineage=None,
+                active_config=token_config,
+                allow_unverified=True,
+                require_dataset=True,
+            )
+        self.assertIn("Dataset format mismatch", str(cm.exception))
+
+        # Case 2: Verified token ckpt + missing active dataset lineage + active config identifying Stroke-3 + allow_unverified=True -> reject (IncompatibleCheckpointError)
+        with self.assertRaises(IncompatibleCheckpointError) as cm:
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=v_token_lineage,
+                dataset_lineage=None,
+                active_config=stroke_config,
+                allow_unverified=True,
+                require_dataset=True,
+            )
+        self.assertIn("Dataset format mismatch", str(cm.exception))
+
+        # Case 3: Missing ckpt lineage + ckpt config identifying one format + verified active dataset lineage identifying opposite format + allow_unverified=True -> reject (IncompatibleCheckpointError)
+        with self.assertRaises(IncompatibleCheckpointError) as cm:
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=None,
+                checkpoint_config=token_config,
+                dataset_lineage=v_stroke_lineage,
+                allow_unverified=True,
+            )
+        self.assertIn("Dataset format mismatch", str(cm.exception))
+
+        with self.assertRaises(IncompatibleCheckpointError) as cm:
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=None,
+                checkpoint_config=stroke_config,
+                dataset_lineage=v_token_lineage,
+                allow_unverified=True,
+            )
+        self.assertIn("Dataset format mismatch", str(cm.exception))
+
+        # Case 4: Missing ckpt lineage + missing active dataset lineage + both configs identifying conflicting formats + allow_unverified=True -> reject (IncompatibleCheckpointError)
+        with self.assertRaises(IncompatibleCheckpointError) as cm:
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=None,
+                checkpoint_config=stroke_config,
+                dataset_lineage=None,
+                active_config=token_config,
+                allow_unverified=True,
+                require_dataset=True,
+            )
+        self.assertIn("Dataset format mismatch", str(cm.exception))
+
+        # Case 5: Missing lineage where available configs identify compatible formats + explicit opt-in -> preserve unverified behavior (succeed with warning)
+        with warnings.catch_warnings(record=True) as ws:
+            warnings.simplefilter("always")
+            compat_res = validate_checkpoint_compatibility(
+                checkpoint_lineage=None,
+                checkpoint_config=token_config,
+                dataset_lineage=v_token_lineage,
+                allow_unverified=True,
+            )
+            self.assertTrue(compat_res)
+            self.assertTrue(any("unverified" in str(w.message).lower() for w in ws))
+
+        # Case 5b: Without opt-in (allow_unverified=False), missing lineage must be rejected as unverified
+        with self.assertRaises(UnverifiedCheckpointError):
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=None,
+                checkpoint_config=token_config,
+                dataset_lineage=v_token_lineage,
+                allow_unverified=False,
+            )
+
+        # Case 6: Missing lineage with no usable config format information + explicit opt-in -> preserve legacy behavior (succeed with warning)
+        with warnings.catch_warnings(record=True) as ws:
+            warnings.simplefilter("always")
+            legacy_res = validate_checkpoint_compatibility(
+                checkpoint_lineage=None,
+                checkpoint_config={},
+                dataset_lineage=None,
+                active_config={},
+                allow_unverified=True,
+                require_dataset=False,
+            )
+            self.assertTrue(legacy_res)
+            self.assertTrue(any("unverified" in str(w.message).lower() for w in ws))
+
+        # Case 6b: Without opt-in (allow_unverified=False), missing lineage without config format is rejected as unverified
+        with self.assertRaises(UnverifiedCheckpointError):
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=None,
+                checkpoint_config={},
+                dataset_lineage=None,
+                active_config={},
+                allow_unverified=False,
+                require_dataset=False,
+            )
+
+    def test_36_missing_is_verified_field_default_safety(self):
+        """Test that omitting is_verified defaults safely to True and fails closed if corrupted.
+
+        Design Rationale:
+        When a checkpoint contains a lineage mapping but omits the 'is_verified' field,
+        defaulting to is_verified=True ensures that it is held to the highest standard:
+        it must have complete provenance (build_id, dataset_fingerprint, and dictionary_fingerprint
+        for token datasets). If any required field is missing, it fails closed with
+        CorruptedProvenanceError, which CANNOT be bypassed with --allow-unverified-checkpoint.
+
+        If it instead defaulted to False, an incomplete or maliciously stripped lineage could
+        bypass provenance verification by pretending to be an unverified legacy checkpoint
+        under --allow-unverified-checkpoint.
+        """
+        model = DummyModel(dim=16)
+
+        # 1. Incomplete token lineage omitting is_verified: defaults to is_verified=True,
+        # missing dictionary_fingerprint fails closed with CorruptedProvenanceError
+        incomplete_token_lineage = {
+            "build_id": "def_bld",
+            "dataset_fingerprint": "def_ds_fp",
+            # dictionary_fingerprint omitted
+            "format": "tok_dict",
+        }
+        with self.assertRaises(CorruptedProvenanceError) as cm:
+            save_checkpoint(
+                self.root / "missing_is_verified_incomplete.pt",
+                model,
+                lineage=incomplete_token_lineage,
+            )
+        self.assertIn("missing ['dictionary_fingerprint']", str(cm.exception))
+
+        # 2. In validate_checkpoint_compatibility, omitting is_verified defaults to True
+        # and fails closed even if allow_unverified=True is passed
+        with self.assertRaises(CorruptedProvenanceError) as cm:
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=incomplete_token_lineage,
+                dataset_lineage=incomplete_token_lineage,
+                allow_unverified=True,
+            )
+        self.assertIn("Checkpoint has incomplete or corrupted provenance metadata", str(cm.exception))
+
+        # 3. Genuinely complete lineage omitting is_verified defaults to True and passes
+        complete_stroke_lineage = {
+            "build_id": "def_s3_bld",
+            "dataset_fingerprint": "def_s3_ds_fp",
+            "dictionary_fingerprint": "",
+            "format": "stroke3",
+        }
+        complete_ckpt = save_checkpoint(
+            self.root / "missing_is_verified_complete.pt",
+            model,
+            lineage=complete_stroke_lineage,
+        )
+        self.assertTrue(complete_ckpt.is_file())
+        self.assertTrue(validate_checkpoint_compatibility(
+            checkpoint_lineage=complete_stroke_lineage,
+            dataset_lineage=complete_stroke_lineage,
+            allow_unverified=False,
+        ))
+
+    def test_37_unknown_format_rejection_in_verified_lineage(self):
+        """Test Finding 1: Explicit unsupported formats in verified lineage must fail closed."""
+        model = DummyModel(dim=16)
+
+        # 1. Unknown top-level format in verified lineage is rejected with CorruptedProvenanceError
+        bad_top_format = {
+            "build_id": "bld_fmt1",
+            "dataset_fingerprint": "ds_fmt1",
+            "dictionary_fingerprint": "",
+            "format": "strok3",  # Typo / unsupported format
+            "is_verified": True,
+        }
+        with self.assertRaises(CorruptedProvenanceError) as cm:
+            save_checkpoint(self.root / "bad_fmt_save.pt", model, lineage=bad_top_format)
+        self.assertIn("Unrecognized or unsupported dataset format 'strok3'", str(cm.exception))
+
+        with self.assertRaises(CorruptedProvenanceError) as cm:
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=bad_top_format,
+                dataset_lineage=bad_top_format,
+            )
+        self.assertIn("Unrecognized or unsupported dataset format 'strok3'", str(cm.exception))
+
+        # Even with allow_unverified=True and a valid active config, invalid format in verified lineage fails closed
+        token_cfg = {"data": {"format": {"type": "tok_dict"}}}
+        with self.assertRaises(CorruptedProvenanceError) as cm:
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=bad_top_format,
+                active_config=token_cfg,
+                allow_unverified=True,
+            )
+        self.assertIn("Unrecognized or unsupported dataset format 'strok3'", str(cm.exception))
+
+        # 2. Unknown nested metadata["format"] in verified lineage is rejected with CorruptedProvenanceError
+        bad_nested_format = {
+            "build_id": "bld_fmt2",
+            "dataset_fingerprint": "ds_fmt2",
+            "dictionary_fingerprint": "",
+            "format": "stroke3",
+            "metadata": {"format": "unknown_vector_format"},
+            "is_verified": True,
+        }
+        with self.assertRaises(CorruptedProvenanceError) as cm:
+            save_checkpoint(self.root / "bad_meta_fmt.pt", model, lineage=bad_nested_format)
+        self.assertIn("Unrecognized or unsupported dataset format 'unknown_vector_format'", str(cm.exception))
+
+        with self.assertRaises(CorruptedProvenanceError) as cm:
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=bad_nested_format,
+                dataset_lineage=bad_nested_format,
+            )
+        self.assertIn("Unrecognized or unsupported dataset format 'unknown_vector_format'", str(cm.exception))
+
+        # 3. Recognized but conflicting format declarations within lineage metadata raise IncompatibleCheckpointError
+        conflicting_lineage_format = {
+            "build_id": "bld_fmt3",
+            "dataset_fingerprint": "ds_fmt3",
+            "dictionary_fingerprint": "dict_fmt3",
+            "format": "stroke3",
+            "metadata": {"format": "tok_dict"},
+            "is_verified": True,
+        }
+        with self.assertRaises(IncompatibleCheckpointError) as cm:
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=conflicting_lineage_format,
+                dataset_lineage=conflicting_lineage_format,
+            )
+        self.assertIn("Conflicting dataset format declarations within lineage metadata", str(cm.exception))
+
+        # 4. Missing format still follows existing safe inference rules
+        missing_fmt_token = {
+            "build_id": "bld_fmt4",
+            "dataset_fingerprint": "ds_fmt4",
+            "dictionary_fingerprint": "dict_fmt4",
+            "is_verified": True,
+        }
+        self.assertTrue(validate_checkpoint_compatibility(
+            checkpoint_lineage=missing_fmt_token,
+            dataset_lineage=missing_fmt_token,
+        ))
+
+        # Missing format with empty dictionary fingerprint infers format from config if provided
+        missing_fmt_stroke = {
+            "build_id": "bld_fmt5",
+            "dataset_fingerprint": "ds_fmt5",
+            "dictionary_fingerprint": "",
+            "is_verified": True,
+        }
+        stroke_cfg = {"data": {"format": {"type": "stroke3"}}}
+        self.assertTrue(validate_checkpoint_compatibility(
+            checkpoint_lineage=missing_fmt_stroke,
+            dataset_lineage=missing_fmt_stroke,
+            checkpoint_config=stroke_cfg,
+            active_config=stroke_cfg,
+        ))
+
+        # If neither format nor dict_fp is present and no config format is available, fails closed
+        with self.assertRaises(CorruptedProvenanceError):
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=missing_fmt_stroke,
+                dataset_lineage=missing_fmt_stroke,
+            )
+
+        # 5. Valid Stroke-3 lineage without a dictionary fingerprint remains accepted
+        valid_stroke = {
+            "build_id": "bld_s3",
+            "dataset_fingerprint": "ds_s3",
+            "dictionary_fingerprint": "",
+            "format": "stroke3",
+            "is_verified": True,
+        }
+        self.assertTrue(validate_checkpoint_compatibility(
+            checkpoint_lineage=valid_stroke,
+            dataset_lineage=valid_stroke,
+        ))
+
+        # 6. Unverified lineage is not silently promoted to verified
+        unverified_fmt = {
+            "build_id": "bld_unv",
+            "dataset_fingerprint": "ds_unv",
+            "dictionary_fingerprint": "",
+            "format": "unsupported_legacy",
+            "is_verified": False,
+        }
+        with self.assertRaises(UnverifiedCheckpointError):
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=unverified_fmt,
+                dataset_lineage=unverified_fmt,
+                allow_unverified=False,
+            )
+
+        # 7. Configuration names do not accidentally cause false conflicts with explicit format types
+        safe_name_cfg = {
+            "data": {
+                "name": "token_count_experiment",
+                "format": {"type": "stroke3"},
+            },
+            "model": {
+                "name": "sketchformer_continuous",
+                "input": {"type": "stroke3"},
+            },
+        }
+        self.assertTrue(validate_checkpoint_compatibility(
+            checkpoint_lineage=valid_stroke,
+            dataset_lineage=valid_stroke,
+            checkpoint_config=safe_name_cfg,
+            active_config=safe_name_cfg,
+        ))
+
+    def test_38_requested_split_hash_enforcement_in_verified_lineage(self):
+        """Test Finding 2: Requested split hash must be present and matching in verified lineages."""
+        base_lineage = {
+            "build_id": "bld_split",
+            "dataset_fingerprint": "ds_split",
+            "dictionary_fingerprint": "",
+            "format": "stroke3",
+            "is_verified": True,
+            "split_hashes": {
+                "train": "hash_train_001",
+                "valid": "hash_valid_001",
+                "test": "hash_test_001",
+            },
+        }
+
+        # 7. Requested split present in both lineages with matching hashes is accepted
+        self.assertTrue(validate_checkpoint_compatibility(
+            checkpoint_lineage=base_lineage,
+            dataset_lineage=base_lineage,
+            split="valid",
+        ))
+        self.assertTrue(validate_checkpoint_compatibility(
+            checkpoint_lineage=base_lineage,
+            dataset_lineage=base_lineage,
+            split="test",
+        ))
+
+        # 8. Requested split present in both lineages with different hashes is rejected
+        mismatched_test_hash = copy.deepcopy(base_lineage)
+        mismatched_test_hash["split_hashes"]["test"] = "hash_test_tampered"
+        with self.assertRaises(IncompatibleCheckpointError) as cm:
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=base_lineage,
+                dataset_lineage=mismatched_test_hash,
+                split="test",
+            )
+        self.assertIn("Dataset split 'test' hash mismatch", str(cm.exception))
+
+        # 9. Requested split missing from checkpoint lineage is rejected when both lineages are verified
+        ckpt_missing_test = copy.deepcopy(base_lineage)
+        del ckpt_missing_test["split_hashes"]["test"]
+        with self.assertRaises(IncompatibleCheckpointError) as cm:
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=ckpt_missing_test,
+                dataset_lineage=base_lineage,
+                split="test",
+            )
+        self.assertIn("Requested evaluation split 'test' is missing from checkpoint lineage split_hashes", str(cm.exception))
+
+        # 10. Requested split missing from active dataset lineage is rejected when both lineages are verified
+        ds_missing_valid = copy.deepcopy(base_lineage)
+        del ds_missing_valid["split_hashes"]["valid"]
+        with self.assertRaises(IncompatibleCheckpointError) as cm:
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=base_lineage,
+                dataset_lineage=ds_missing_valid,
+                split="valid",
+            )
+        self.assertIn("Requested evaluation split 'valid' is missing from active dataset lineage split_hashes", str(cm.exception))
+
+        # 11. allow_unverified=True does not bypass a known split-hash mismatch
+        with self.assertRaises(IncompatibleCheckpointError) as cm:
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=base_lineage,
+                dataset_lineage=mismatched_test_hash,
+                split="test",
+                allow_unverified=True,
+            )
+        self.assertIn("Dataset split 'test' hash mismatch", str(cm.exception))
+
+        # Even if one side is unverified, a known split mismatch between recorded hashes fails closed
+        unverified_mismatch = copy.deepcopy(mismatched_test_hash)
+        unverified_mismatch["is_verified"] = False
+        with self.assertRaises(IncompatibleCheckpointError) as cm:
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=base_lineage,
+                dataset_lineage=unverified_mismatch,
+                split="test",
+                allow_unverified=True,
+            )
+        self.assertIn("Dataset split 'test' hash mismatch", str(cm.exception))
+
+        # 12. Existing unverified-lineage opt-in behavior remains correct
+        legacy_unverified_lineage = {
+            "build_id": "",
+            "dataset_fingerprint": "",
+            "dictionary_fingerprint": "",
+            "format": "stroke3",
+            "is_verified": False,
+            # split_hashes omitted
+        }
+        with self.assertRaises(UnverifiedCheckpointError):
+            validate_checkpoint_compatibility(
+                checkpoint_lineage=legacy_unverified_lineage,
+                dataset_lineage=base_lineage,
+                split="test",
+                allow_unverified=False,
+            )
+
+        with warnings.catch_warnings(record=True) as ws:
+            warnings.simplefilter("always")
+            res = validate_checkpoint_compatibility(
+                checkpoint_lineage=legacy_unverified_lineage,
+                dataset_lineage=base_lineage,
+                split="test",
+                allow_unverified=True,
+            )
+            self.assertTrue(res)
+            self.assertTrue(any("unverified" in str(w.message).lower() for w in ws))
+
 
 if __name__ == "__main__":
     unittest.main()
-
 
