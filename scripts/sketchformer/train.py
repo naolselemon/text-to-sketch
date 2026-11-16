@@ -63,6 +63,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-epochs", type=int, default=None)
     parser.add_argument("--limit-train-batches", type=parse_batch_limit, default=None)
     parser.add_argument("--limit-val-batches", type=parse_batch_limit, default=None)
+    parser.add_argument(
+        "--allow-unverified-checkpoint",
+        action="store_true",
+        help="Allow resuming from legacy checkpoints without dataset lineage metadata.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -318,24 +323,58 @@ def main() -> int:
         )
         return 0
 
+    dataset_root_val = get_nested(config, "data.dataset.root")
+    dataset_lineage = None
+    if dataset_root_val:
+        resolved_data_root = _resolve_project_path(dataset_root_val)
+        config["data"]["dataset"]["root"] = str(resolved_data_root)
+        if (resolved_data_root / "meta.npz").is_file():
+            from dataloaders.lineage import load_dataset_lineage
+
+            dataset_lineage = load_dataset_lineage(
+                resolved_data_root,
+                verify_chunks=True,
+                allow_unverified=args.allow_unverified_checkpoint,
+            )
+
     datamodule = StrokeSequenceDataModule(
         config["data"],
         project_root=PROJECT_ROOT,
         seed=seed,
+        lineage=dataset_lineage,
+        allow_unverified=args.allow_unverified_checkpoint,
     )
     datamodule.setup("fit")
+
+    resume_path = get_nested(config, "experiment.run.resume_from_checkpoint")
+    resume_result = None
+    if resume_path:
+        from core import (
+            load_checkpoint,
+            load_checkpoint_metadata,
+            validate_checkpoint_compatibility,
+        )
+
+        resolved_resume_path = _resolve_project_path(resume_path)
+        resume_meta = load_checkpoint_metadata(resolved_resume_path)
+        validate_checkpoint_compatibility(
+            resume_meta.get("lineage"),
+            dataset_lineage,
+            checkpoint_config=resume_meta.get("config"),
+            active_config=config,
+            allow_unverified=args.allow_unverified_checkpoint,
+            require_dataset=True,
+        )
+
     raw_model = build_model(config["model"])
     _load_pretrained_if_configured(raw_model, config)
     raw_model = raw_model.to(device)
     model = maybe_compile_model(raw_model, config["model"])
     loss_fn = build_loss(config["optimizer"]).to(device)
-    resume_path = get_nested(config, "experiment.run.resume_from_checkpoint")
-    resume_result = None
-    if resume_path:
-        from core import load_checkpoint
 
+    if resume_path:
         resume_result = load_checkpoint(
-            _resolve_project_path(resume_path),
+            resolved_resume_path,
             raw_model,
             strict=False,
         )
@@ -351,6 +390,8 @@ def main() -> int:
         ),
         mode=str(get_nested(config, "trainer.checkpointing.mode", "min")),
         save_last=bool(get_nested(config, "trainer.checkpointing.save_last", True)),
+        lineage=dataset_lineage,
+        config=config,
     )
 
     log_every = int(get_nested(config, "trainer.training.log_every_n_steps", 10))

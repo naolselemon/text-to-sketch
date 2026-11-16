@@ -110,6 +110,37 @@ def load_token_sequence(path: Path | str) -> np.ndarray:
         return np.array(data["tokens"], copy=True)
 
 
+def load_token_sequence_with_metadata(
+    path: Path | str,
+) -> tuple[np.ndarray, dict[str, str]]:
+    """Read a token archive and its optional scalar provenance fields without pickle."""
+    provenance_keys = {
+        "sample_id", "build_id", "tokens_sha256", "token_sha256",
+        "token_dict_sha256", "token_dictionary_sha256", "codebook_sha256",
+        "dictionary_fingerprint",
+    }
+    with np.load(str(path), allow_pickle=False) as data:
+        if "tokens" in data.files:
+            token_key = "tokens"
+        elif len(data.files) == 1:
+            token_key = data.files[0]
+        else:
+            raise ValueError(f"Expected a tokens array in {path}, found {data.files}")
+
+        tokens = np.asarray(data[token_key], dtype=np.int64)
+        if tokens.ndim != 1:
+            raise ValueError(f"Expected one-dimensional tokens in {path}, got {tokens.shape}")
+
+        metadata: dict[str, str] = {}
+        for key in data.files:
+            if key in provenance_keys and key != token_key:
+                value = data[key]
+                if value.ndim != 0 or value.dtype.kind not in "US":
+                    raise ValueError(f"Expected scalar text metadata {key!r} in {path}")
+                metadata[key] = str(value.item())
+        return tokens, metadata
+
+
 # Codebook
 
 def load_codebook(codebook_path: Path | str) -> np.ndarray:

@@ -191,10 +191,16 @@ class StrokeSequenceDataModule:
         *,
         project_root: str | Path | None = None,
         seed: int = 42,
+        lineage: Any | None = None,
+        verify_integrity: bool = True,
+        allow_unverified: bool = False,
     ) -> None:
         self.config = _to_plain_config(config)
         self.project_root = Path(project_root) if project_root is not None else Path.cwd()
         self.seed = int(seed)
+        self.lineage = lineage
+        self.verify_integrity = bool(verify_integrity)
+        self.allow_unverified = bool(allow_unverified)
 
         self.train_dataset: StrokeSequenceDataset | None = None
         self.valid_dataset: StrokeSequenceDataset | None = None
@@ -294,6 +300,9 @@ class StrokeSequenceDataModule:
             format_type=self.format_type,
             transform=transform,
             max_cached_files=int(_get(self.config, "preprocessing.max_cached_files", 2)),
+            lineage=self.lineage,
+            verify_integrity=self.verify_integrity,
+            allow_unverified=self.allow_unverified,
         )
 
     def _make_loader(self, dataset: StrokeSequenceDataset, *, split: str) -> DataLoader:
