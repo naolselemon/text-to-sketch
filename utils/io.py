@@ -12,7 +12,7 @@ import os
 import stat
 import tempfile
 from pathlib import Path
-from typing import Any, Generator
+from typing import Generator
 
 import numpy as np
 
@@ -98,28 +98,10 @@ def load_all_stroke5(
 
 # Token sequences
 
-def save_token_sequence(
-    tokens: np.ndarray,
-    path: Path | str,
-    *,
-    build_id: str | None = None,
-    token_dict_sha256: str | None = None,
-    sample_id: str | None = None,
-    **metadata: Any,
-) -> None:
-    """Save a token-index sequence and optional provenance metadata to a compressed .npz file."""
+def save_token_sequence(tokens: np.ndarray, path: Path | str) -> None:
+    """Save a token-index sequence to a compressed .npz file."""
     path = Path(path)
-    payload: dict[str, Any] = {"tokens": np.asarray(tokens, dtype=np.int64)}
-    if build_id is not None:
-        payload["build_id"] = np.asarray(str(build_id))
-    if token_dict_sha256 is not None:
-        payload["token_dict_sha256"] = np.asarray(str(token_dict_sha256))
-    if sample_id is not None:
-        payload["sample_id"] = np.asarray(str(sample_id))
-    for key, value in metadata.items():
-        if value is not None:
-            payload[key] = np.asarray(value)
-    _atomic_savez_compressed(path, **payload)
+    _atomic_savez_compressed(path, tokens=tokens)
 
 
 def load_token_sequence(path: Path | str) -> np.ndarray:
@@ -130,16 +112,33 @@ def load_token_sequence(path: Path | str) -> np.ndarray:
 
 def load_token_sequence_with_metadata(
     path: Path | str,
-) -> tuple[np.ndarray, dict[str, Any]]:
-    """Load a token sequence alongside any stored provenance metadata."""
-    with np.load(str(path), allow_pickle=True) as data:
-        tokens = np.array(data["tokens"], copy=True)
-        meta: dict[str, Any] = {}
+) -> tuple[np.ndarray, dict[str, str]]:
+    """Read a token archive and its optional scalar provenance fields without pickle."""
+    provenance_keys = {
+        "sample_id", "build_id", "tokens_sha256", "token_sha256",
+        "token_dict_sha256", "token_dictionary_sha256", "codebook_sha256",
+        "dictionary_fingerprint",
+    }
+    with np.load(str(path), allow_pickle=False) as data:
+        if "tokens" in data.files:
+            token_key = "tokens"
+        elif len(data.files) == 1:
+            token_key = data.files[0]
+        else:
+            raise ValueError(f"Expected a tokens array in {path}, found {data.files}")
+
+        tokens = np.asarray(data[token_key], dtype=np.int64)
+        if tokens.ndim != 1:
+            raise ValueError(f"Expected one-dimensional tokens in {path}, got {tokens.shape}")
+
+        metadata: dict[str, str] = {}
         for key in data.files:
-            if key != "tokens":
-                val = data[key]
-                meta[key] = val.item() if val.shape == () else val
-        return tokens, meta
+            if key in provenance_keys and key != token_key:
+                value = data[key]
+                if value.ndim != 0 or value.dtype.kind not in "US":
+                    raise ValueError(f"Expected scalar text metadata {key!r} in {path}")
+                metadata[key] = str(value.item())
+        return tokens, metadata
 
 
 # Codebook

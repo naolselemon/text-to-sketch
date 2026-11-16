@@ -92,27 +92,6 @@ class RunPipelineCliTest(unittest.TestCase):
                     ]
                 )
 
-    def test_cli_passes_build_id(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            sketches_dir = Path(tmpdir) / "sketches"
-            sketches_dir.mkdir()
-            (sketches_dir / "sketch.png").write_bytes(b"")
-
-            with patch.object(run_pipeline_cli, "run_pipeline") as mock_run:
-                run_pipeline_cli.main(
-                    [
-                        "--sketches-dir",
-                        str(sketches_dir),
-                        "--n-sketches",
-                        "1",
-                        "--ordering",
-                        "continuity",
-                        "--build-id",
-                        "test_build_123",
-                    ]
-                )
-                self.assertEqual(mock_run.call_args.kwargs.get("build_id"), "test_build_123")
-
 
 if __name__ == "__main__":
     unittest.main()

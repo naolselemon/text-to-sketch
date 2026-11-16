@@ -51,13 +51,6 @@ class StrokeSequenceDatasetTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _write_token_chunk(root / "train_000.npz", [[1002, 1, 1003], [1002, 2, 1001, 1003]])
-            np.savez(
-                root / "meta.npz",
-                is_published=True,
-                train_chunks=np.asarray(["train_000.npz"], dtype=object),
-                train_chunk_counts=np.asarray([2], dtype=np.int32),
-                n_samples_train=2,
-            )
 
             dataset = StrokeSequenceDataset(
                 root,

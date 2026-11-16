@@ -54,14 +54,59 @@ class StrokeSequenceDataset(Dataset):
         self.lineage = lineage
         self.verify_integrity = bool(verify_integrity)
         self.allow_unverified = bool(allow_unverified)
+<<<<<<< HEAD
         self._cache: OrderedDict[Path, tuple[dict[str, np.ndarray], float]] = OrderedDict()
 
         self.metadata = self._load_metadata()
         self._verify_metadata()
+=======
+        self._cache: OrderedDict[Path, tuple[dict[str, np.ndarray], float, int]] = OrderedDict()
+
+        self.metadata = self._load_metadata()
+>>>>>>> 59b0fe3f0e28f0e53ffba5988a6b9911698e1d8c
         self.declared_checksums: dict[str, str] = self._resolve_chunk_checksums()
         self.files = self._resolve_files(train_pattern, valid_file, test_file)
         self.index = self._build_index()
-        self._verify_index()
+
+    def _resolve_chunk_checksums(self) -> dict[str, str]:
+        if self.lineage is not None:
+            lineage_root = self.lineage.metadata.get("root") if hasattr(self.lineage, "metadata") and self.lineage.metadata else None
+            if lineage_root:
+                try:
+                    if Path(lineage_root).resolve() != self.root.resolve():
+                        raise ValueError(
+                            f"DataLoader root mismatch: dataset initialized with {self.root} "
+                            f"but lineage was verified for {lineage_root}"
+                        )
+                except Exception as e:
+                    if isinstance(e, ValueError):
+                        raise
+            meta_build_id = str(self.metadata.get("build_id", "")).strip()
+            lineage_build_id = str(getattr(self.lineage, "build_id", "")).strip()
+            if meta_build_id and lineage_build_id and meta_build_id != lineage_build_id:
+                raise ValueError(
+                    f"DataLoader build_id mismatch: dataset has build_id '{meta_build_id}' "
+                    f"but lineage has '{lineage_build_id}'"
+                )
+            if not getattr(self.lineage, "is_verified", False) and not self.allow_unverified:
+                raise ValueError(
+                    "Provided dataset lineage is unverified. Pass allow_unverified=True to permit loading."
+                )
+
+        declared_checksums: dict[str, str] = {}
+        if self.lineage is not None and getattr(self.lineage, "chunk_checksums", None):
+            declared_checksums = {str(k): str(v) for k, v in self.lineage.chunk_checksums.items()}
+        elif "chunk_checksums" in self.metadata:
+            raw = self.metadata["chunk_checksums"]
+            if isinstance(raw, str):
+                try:
+                    declared_checksums = json.loads(raw)
+                except Exception:
+                    pass
+            elif isinstance(raw, dict):
+                declared_checksums = {str(k): str(v) for k, v in raw.items()}
+
+        return declared_checksums
 
     def _resolve_chunk_checksums(self) -> dict[str, str]:
         if self.lineage is not None:
@@ -133,51 +178,20 @@ class StrokeSequenceDataset(Dataset):
     def lengths(self) -> list[int]:
         return [entry.length for entry in self.index]
 
-    def _verify_metadata(self) -> None:
-        meta_format = str(self.metadata.get("format", ""))
-        is_tok_dict = (
-            self.format_type in {"tok_dict", "token", "tokens"}
-            or meta_format in {"tok_dict", "token", "tokens"}
-        )
-        if is_tok_dict or "is_published" in self.metadata:
-            meta_path = self.root / self.metadata_file
-            if not meta_path.is_file():
-                raise RuntimeError(
-                    f"Dataset at {self.root} is not published or build was interrupted. "
-                    f"Missing metadata file {self.metadata_file}."
-                )
-            if not bool(self.metadata.get("is_published", False)):
-                raise RuntimeError(
-                    f"Dataset at {self.root} is not published or build was interrupted. "
-                    "meta.npz is missing the verified publication marker."
-                )
-
     def _resolve_files(self, train_pattern: str, valid_file: str, test_file: str) -> list[Path]:
         if not self.root.exists():
             raise FileNotFoundError(f"Dataset root does not exist: {self.root}")
 
         if self.split == "train":
-            if "train_chunks" in self.metadata:
-                files = [self.root / str(name) for name in self.metadata["train_chunks"]]
-            else:
-                files = sorted(self.root.glob(train_pattern))
+            files = sorted(self.root.glob(train_pattern))
         elif self.split == "valid":
-            if "valid_chunks" in self.metadata:
-                files = [self.root / str(name) for name in self.metadata["valid_chunks"]]
-            else:
-                files = [self.root / valid_file]
+            files = [self.root / valid_file]
         elif self.split == "test":
-            if "test_chunks" in self.metadata:
-                files = [self.root / str(name) for name in self.metadata["test_chunks"]]
-            else:
-                files = [self.root / test_file]
+            files = [self.root / test_file]
         else:
             raise ValueError("split must be one of: train, valid, test")
 
-        for path in files:
-            if not path.is_file():
-                raise FileNotFoundError(f"Required chunk file does not exist: {path}")
-
+        files = [path for path in files if path.exists()]
         if not files:
             raise FileNotFoundError(f"No {self.split} files found under {self.root}")
         return files
@@ -204,32 +218,6 @@ class StrokeSequenceDataset(Dataset):
         if not index:
             raise ValueError(f"Split {self.split} is empty under {self.root}")
         return index
-
-    def _verify_index(self) -> None:
-        chunk_count_key = f"{self.split}_chunk_counts"
-        if chunk_count_key in self.metadata:
-            expected_counts = list(self.metadata[chunk_count_key])
-            if len(expected_counts) != len(self.files):
-                raise ValueError(
-                    f"Chunk list length mismatch for split {self.split}: "
-                    f"expected {len(expected_counts)} chunks, found {len(self.files)}"
-                )
-            for file_path, expected_count in zip(self.files, expected_counts):
-                actual_count = sum(1 for entry in self.index if entry.file_path == file_path)
-                if actual_count != int(expected_count):
-                    raise ValueError(
-                        f"Chunk count mismatch in {file_path}: "
-                        f"expected {expected_count}, got {actual_count}"
-                    )
-
-        split_count_key = f"n_samples_{self.split}"
-        if split_count_key in self.metadata:
-            expected_total = int(self.metadata[split_count_key])
-            if len(self.index) != expected_total:
-                raise ValueError(
-                    f"Total sample count mismatch for split '{self.split}': "
-                    f"expected {expected_total}, got {len(self.index)}"
-                )
 
     def _load_metadata(self) -> dict[str, Any]:
         meta_path = self.root / self.metadata_file

@@ -6,12 +6,8 @@ import argparse
 import hashlib
 import json
 import os
-import re
-import shutil
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 
@@ -22,7 +18,10 @@ from dataloaders.lineage import (
 )
 from prep_data.prepare_sketchformer import build_splits, chunk_sketch_data
 from prep_data.sketch_token.create_token_dict import (
+<<<<<<< HEAD
     compute_codebook_artifact_checksum,
+=======
+>>>>>>> 59b0fe3f0e28f0e53ffba5988a6b9911698e1d8c
     get_token_dict_fingerprint,
     load_codebook_from_dir,
 )
@@ -39,16 +38,8 @@ def load_stroke5_file(path: Path) -> np.ndarray:
 
 
 def load_token_file(path: Path) -> np.ndarray:
-    data = np.load(path, allow_pickle=False)
-    if "tokens" in data.files:
-        values = data["tokens"]
-    elif len(data.files) == 1:
-        values = data[data.files[0]]
-    else:
-        raise ValueError(f"Expected a tokens array in {path}, found {data.files}")
-    tokens = np.asarray(values, dtype=np.int64)
-    if tokens.ndim != 1:
-        raise ValueError(f"Expected one-dimensional tokens in {path}, got {tokens.shape}")
+    """Load legacy single-array or named token archives without requantizing."""
+    tokens, _ = load_token_sequence_with_metadata(path)
     return tokens
 
 
@@ -92,128 +83,29 @@ def save_chunk(
     )
 
 
-def _snapshot_previous_build(target_path: Path) -> None:
-    meta_path = target_path / "meta.npz"
-    if not meta_path.is_file():
-        return
-    prev_build_id: str | None = None
-    chunk_names: set[str] = set()
-    try:
-        with np.load(meta_path, allow_pickle=True) as prev_meta:
-            if "build_id" in prev_meta:
-                prev_build_id = str(prev_meta["build_id"])
-            if "train_chunks" in prev_meta:
-                chunk_names.update(str(c) for c in prev_meta["train_chunks"])
-            if "valid_chunks" in prev_meta:
-                chunk_names.update(str(c) for c in prev_meta["valid_chunks"])
-            if "test_chunks" in prev_meta:
-                chunk_names.update(str(c) for c in prev_meta["test_chunks"])
-    except Exception:
-        pass
-
-    if not prev_build_id:
-        prev_build_id = f"prev_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
-
-    safe_prev_id = re.sub(r"[^a-zA-Z0-9_.-]", "_", prev_build_id)
-    versions_dir = target_path / "versions" / safe_prev_id
-    versions_dir.mkdir(parents=True, exist_ok=True)
-
-    shutil.copy2(meta_path, versions_dir / "meta.npz")
-    report_path = target_path / "preparation_report.json"
-    if report_path.is_file():
-        shutil.copy2(report_path, versions_dir / "preparation_report.json")
-
-    if not chunk_names:
-        for p in target_path.glob("train_*.npz"):
-            chunk_names.add(p.name)
-        for p in target_path.glob("valid*.npz"):
-            chunk_names.add(p.name)
-        for p in target_path.glob("test*.npz"):
-            chunk_names.add(p.name)
-
-    for name in chunk_names:
-        src = target_path / name
-        if src.is_file():
-            shutil.copy2(src, versions_dir / Path(name).name)
-
-
-def discover_manifest(source_path: Path, manifest_arg: str | Path | None = None) -> Path | None:
-    if manifest_arg:
-        p = Path(manifest_arg)
-        if not p.is_file():
-            raise FileNotFoundError(f"Specified manifest file not found: {p}")
-        return p
-    candidates = [
-        source_path / "preprocessing_manifest.jsonl",
-        source_path.parent / "preprocessing_manifest.jsonl",
-        source_path / "preprocessing_manifest.json",
-        source_path.parent / "preprocessing_manifest.json",
-        source_path / "manifest.jsonl",
-        source_path.parent / "manifest.jsonl",
-        source_path / "manifest.json",
-        source_path.parent / "manifest.json",
+def load_manifest_records(path: Path) -> dict[str, dict[str, object]]:
+    """Index accepted preprocessing records by their stable sample IDs."""
+    text = path.read_text(encoding="utf-8").strip()
+    rows = json.loads(text) if text.startswith("[") else [
+        json.loads(line) for line in text.splitlines() if line.strip()
     ]
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
-    return None
-
-
-def load_manifest_records(manifest_path: Path) -> list[dict[str, Any]]:
-    records: list[dict[str, Any]] = []
-    content = manifest_path.read_text(encoding="utf-8").strip()
-    if not content:
-        return []
-    if content.startswith("["):
-        try:
-            parsed = json.loads(content)
-            if isinstance(parsed, list):
-                records = parsed
-        except json.JSONDecodeError:
-            pass
-    if not records:
-        for line_no, line in enumerate(content.splitlines(), start=1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                records.append(json.loads(line))
-            except json.JSONDecodeError as err:
-                raise ValueError(
-                    f"Invalid JSON on line {line_no} in manifest {manifest_path}: {err}"
-                ) from err
-
+    records: dict[str, dict[str, object]] = {}
     seen_ids: set[str] = set()
-    duplicate_ids: list[str] = []
-    for r in records:
-        sid = r.get("sample_id") or r.get("drawing_id") or r.get("id")
-        if sid is not None:
-            sid_str = str(sid)
-            if sid_str in seen_ids:
-                duplicate_ids.append(sid_str)
-            seen_ids.add(sid_str)
-    if duplicate_ids:
-        raise ValueError(f"Duplicate drawing IDs detected in manifest: {sorted(set(duplicate_ids))}")
-
+    for record in rows:
+        sample_id = str(
+            record.get("sample_id") or record.get("drawing_id") or record.get("id") or ""
+        ).strip()
+        if not sample_id:
+            raise ValueError(f"Manifest record in {path} lacks a sample ID")
+        if sample_id in seen_ids:
+            raise ValueError(f"Duplicate drawing ID in manifest {path}: {sample_id}")
+        seen_ids.add(sample_id)
+        if record.get("status") == "accepted" or record.get("accepted") is True:
+            records[sample_id] = record
     return records
 
 
-def _resolve_sample_file(source_path: Path, sample_id: str, record: dict[str, Any]) -> Path:
-    candidates: list[Path] = []
-    if record.get("tokens_path"):
-        cand = Path(record["tokens_path"])
-        candidates.append(cand)
-        if not cand.is_absolute():
-            candidates.append(source_path / cand)
-    candidates.append(source_path / f"{sample_id}.npz")
-    candidates.append(source_path / sample_id)
-    for c in candidates:
-        if c.is_file():
-            return c
-    return source_path / f"{sample_id}.npz"
-
-
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Prepare anime stroke5 data as tok-dict Sketchformer chunks."
     )
@@ -254,27 +146,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Use cumulative-error-correcting quantization for stroke5 input.",
     )
     parser.add_argument("--n-classes", type=int, default=1)
+    parser.add_argument("--manifest", type=Path, help="Preprocessing manifest JSONL or JSON array.")
+    parser.add_argument("--build-id", help="Unique dataset build identifier.")
     parser.add_argument(
-        "--manifest",
-        default=None,
-        help="Path to manifest JSONL from preprocessing run.",
+        "--allow-unverified-codebook",
+        action="store_true",
+        help="Allow a legacy codebook, but mark the resulting dataset unverified.",
     )
-    parser.add_argument(
-        "--build-id",
-        default=None,
-        help="Build ID for dataset lineage tracking and verification.",
-    )
-    parser.add_argument(
-        "--reject-unexpected-files",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Reject any .npz files on disk not recorded in the run manifest.",
-    )
-    return parser.parse_args(argv)
+    return parser.parse_args()
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
+def main() -> int:
+    args = parse_args()
     if args.n_chunks <= 0:
         raise ValueError("--n-chunks must be positive")
 
@@ -288,6 +171,7 @@ def main(argv: list[str] | None = None) -> int:
     token_dict_dir = Path(args.token_dict_dir)
     target_path.mkdir(parents=True, exist_ok=True)
 
+<<<<<<< HEAD
     if args.build_id:
         target_meta = target_path / "meta.npz"
         if target_meta.is_file():
@@ -313,6 +197,32 @@ def main(argv: list[str] | None = None) -> int:
     codebook, codebook_metadata = load_codebook_from_dir(token_dict_dir)
     current_dict_fingerprint = get_token_dict_fingerprint(token_dict_dir)
     current_codebook_checksum = compute_codebook_artifact_checksum(codebook)
+=======
+    if args.build_id and not args.build_id.strip():
+        raise ValueError("--build-id must not be empty")
+    if (target_path / "meta.npz").exists():
+        with np.load(target_path / "meta.npz", allow_pickle=False) as previous:
+            if args.build_id and str(previous.get("build_id", "")) == args.build_id:
+                raise ValueError(
+                    f"Dataset build '{args.build_id}' already exists at {target_path}. "
+                    "Dataset builds are immutable; to create a new build, use a distinct build ID."
+                )
+            if bool(previous.get("is_published", False)) or bool(previous.get("verified", False)):
+                raise ValueError(
+                    f"Verified dataset already exists at {target_path}; use a new target directory."
+                )
+
+    codebook, codebook_metadata = load_codebook_from_dir(
+        token_dict_dir, allow_unverified=args.allow_unverified_codebook
+    )
+    current_dict_fingerprint = get_token_dict_fingerprint(
+        token_dict_dir, allow_unverified=args.allow_unverified_codebook
+    )
+    current_codebook_checksum = codebook_metadata.get("codebook_sha256")
+    current_codebook_file_checksum = hashlib.sha256(
+        (token_dict_dir / "codebook.npy").read_bytes()
+    ).hexdigest()
+>>>>>>> 59b0fe3f0e28f0e53ffba5988a6b9911698e1d8c
     codebook_size = int(len(codebook))
     motion_token_offset = 1
     pad_token_id = 0
@@ -321,85 +231,46 @@ def main(argv: list[str] | None = None) -> int:
     eos_token_id = codebook_size + 3
     vocab_size = codebook_size + 4
 
-    manifest_path = discover_manifest(source_path, args.manifest)
-    manifest_records: list[dict[str, Any]] | None = None
-    if manifest_path is not None:
-        manifest_records = load_manifest_records(manifest_path)
+    file_list = sorted(source_path.rglob("*.npz"))
+    if not file_list:
+        raise FileNotFoundError(f"No .npz files found in {source_path}")
 
-    disk_files = sorted(source_path.rglob("*.npz")) if source_path.exists() else []
-
-    accepted_build_ids: set[str] = set()
-    if manifest_records is not None:
-        for r in manifest_records:
-            status = r.get("status")
-            is_accepted = (status == "accepted") or (r.get("accepted") is True)
-            if is_accepted:
-                bid = r.get("build_id")
-                if bid is not None and str(bid).strip():
-                    accepted_build_ids.add(str(bid).strip())
-
-        if len(accepted_build_ids) > 1:
+    manifest_path = args.manifest
+    if manifest_path is None:
+        manifest_path = next(
+            (
+                candidate
+                for directory in (source_path, source_path.parent)
+                for name in ("preprocessing_manifest.jsonl", "preprocessing_manifest.json")
+                if (candidate := directory / name).is_file()
+            ),
+            None,
+        )
+    if manifest_path is not None and not manifest_path.is_file():
+        raise FileNotFoundError(f"Preprocessing manifest not found: {manifest_path}")
+    records = load_manifest_records(manifest_path) if manifest_path else {}
+    if manifest_path:
+        file_ids = {path.relative_to(source_path).with_suffix("").as_posix() for path in file_list}
+        if file_ids != records.keys():
             raise ValueError(
-                f"Multiple distinct build IDs detected among accepted records in manifest: "
-                f"{sorted(accepted_build_ids)}. All accepted records must share a single consistent build_id."
+                f"Manifest/source mismatch: untracked={sorted(file_ids - records.keys())}, "
+                f"missing={sorted(records.keys() - file_ids)}"
             )
-
-        if args.build_id:
-            for r in manifest_records:
-                status = r.get("status")
-                is_accepted = (status == "accepted") or (r.get("accepted") is True)
-                if is_accepted:
-                    bid = r.get("build_id")
-                    if bid is not None and str(bid).strip() and str(bid).strip() != str(args.build_id):
-                        sid = r.get("sample_id") or r.get("drawing_id") or r.get("id")
-                        raise ValueError(
-                            f"Build ID mismatch for accepted sample '{sid}': "
-                            f"manifest recorded '{bid}', expected '{args.build_id}'"
-                        )
-
-        manifest_by_id: dict[str, dict[str, Any]] = {}
-        for r in manifest_records:
-            sid = r.get("sample_id") or r.get("drawing_id") or r.get("id")
-            if sid is not None:
-                manifest_by_id[str(sid)] = r
-
-        if args.tokens_dir and args.reject_unexpected_files:
-            for disk_file in disk_files:
-                sample_id = disk_file.relative_to(source_path).with_suffix("").as_posix()
-                if sample_id not in manifest_by_id and disk_file.stem not in manifest_by_id:
-                    raise ValueError(
-                        f"Unexpected untracked token file found on disk not listed in manifest: {disk_file}"
-                    )
-
-        items_to_process: list[tuple[Path, str, dict[str, Any]]] = []
-        for r in manifest_records:
-            status = r.get("status")
-            is_accepted = (status == "accepted") or (r.get("accepted") is True)
-            if not is_accepted:
-                continue
-
-            sid = str(r.get("sample_id") or r.get("drawing_id") or r.get("id"))
-            expected_file = _resolve_sample_file(source_path, sid, r)
-            if not expected_file.is_file():
-                raise FileNotFoundError(
-                    f"Missing token file for accepted sample '{sid}': {expected_file}"
-                )
-            items_to_process.append((expected_file, sid, r))
-    else:
-        if args.tokens_dir and args.reject_unexpected_files:
-            raise ValueError(
-                f"No manifest found in or around {source_path} and --reject-unexpected-files is enabled. "
-                "A manifest is required to prevent data leakage."
-            )
-        if not disk_files:
-            raise FileNotFoundError(f"No .npz files found in {source_path}")
-        items_to_process = [
-            (f, f.relative_to(source_path).with_suffix("").as_posix(), {})
-            for f in disk_files
-        ]
+    accepted_build_ids = {
+        str(record["build_id"]).strip()
+        for record in records.values() if record.get("build_id")
+    }
+    if len(accepted_build_ids) > 1 or (
+        args.build_id and accepted_build_ids and accepted_build_ids != {args.build_id}
+    ):
+        raise ValueError(f"Manifest build ID mismatch: {sorted(accepted_build_ids)}")
+    resolved_build_id = args.build_id or (
+        next(iter(accepted_build_ids)) if accepted_build_ids else None
+    )
 
     prepared: list[tuple[np.ndarray, str]] = []
     rejected: list[dict[str, object]] = []
+<<<<<<< HEAD
     for path, sample_id, record in items_to_process:
         expected_tokens_sha256 = record.get("tokens_sha256") or record.get("token_sha256")
         if expected_tokens_sha256:
@@ -454,13 +325,66 @@ def main(argv: list[str] | None = None) -> int:
                             f"Build ID mismatch in token file {path}: "
                             f"embedded {embedded_meta['build_id']}, expected {expected_build}"
                         )
+=======
+    sources_attested = True
+    for path in file_list:
+        sample_id = path.relative_to(source_path).with_suffix("").as_posix()
+        record = records.get(sample_id, {})
+        recorded_path = record.get("tokens_path" if args.tokens_dir else "stroke5_path")
+        if recorded_path is not None and Path(str(recorded_path)).resolve() != path.resolve():
+            raise ValueError(f"Manifest source path mismatch for {sample_id}: {recorded_path}")
+        expected_hash = record.get("tokens_sha256") or record.get("token_sha256")
+        if args.tokens_dir and expected_hash and hashlib.sha256(path.read_bytes()).hexdigest() != str(expected_hash):
+            raise ValueError(f"SHA-256 hash mismatch for source file {path}")
+        for field in (
+            "token_dictionary_sha256", "token_dict_sha256", "codebook_sha256",
+            "dictionary_fingerprint",
+        ):
+            value = record.get(field)
+            if value and str(value).strip() not in {
+                current_dict_fingerprint, current_codebook_checksum,
+                current_codebook_file_checksum,
+            }:
+                raise ValueError(f"Token dictionary fingerprint mismatch for {sample_id}: {field}={value}")
+        if args.tokens_dir:
+            tokens, embedded_meta = load_token_sequence_with_metadata(path)
+            if embedded_meta.get("sample_id") and embedded_meta["sample_id"] != sample_id:
+                raise ValueError(f"Sample ID mismatch in token file {path}")
+            embedded_build_id = embedded_meta.get("build_id")
+            if embedded_build_id:
+                if resolved_build_id and embedded_build_id != resolved_build_id:
+                    raise ValueError(f"Build ID mismatch in token file {path}")
+                resolved_build_id = embedded_build_id
+            if embedded_meta.get("tokens_sha256") and (
+                hashlib.sha256(path.read_bytes()).hexdigest() != embedded_meta["tokens_sha256"]
+            ):
+                raise ValueError(f"SHA-256 hash mismatch in token file {path}")
+            for field in (
+                "token_dictionary_sha256", "token_dict_sha256", "codebook_sha256",
+                "dictionary_fingerprint",
+            ):
+                value = embedded_meta.get(field)
+                if value and value.strip() not in {
+                    current_dict_fingerprint, current_codebook_checksum,
+                    current_codebook_file_checksum,
+                }:
+                    raise ValueError(f"Token dictionary fingerprint mismatch in token file {path}: {field}={value}")
+            sources_attested &= any(
+                embedded_meta.get(key) or record.get(key)
+                for key in (
+                    "token_dictionary_sha256", "token_dict_sha256",
+                    "codebook_sha256", "dictionary_fingerprint",
+                )
+            )
+>>>>>>> 59b0fe3f0e28f0e53ffba5988a6b9911698e1d8c
         else:
             tokens = encode_stroke5(
                 load_stroke5_file(path),
                 codebook,
                 error_feedback=error_feedback,
             )
-
+        if not sample_id:
+            raise ValueError(f"Empty sample ID for {path}")
         if len(tokens) < 2 or int(tokens[0]) != sos_token_id or int(tokens[-1]) != eos_token_id:
             raise ValueError(f"{sample_id} must start with SOS and end with EOS")
         if int(tokens.min()) < 0 or int(tokens.max()) >= vocab_size:
@@ -491,6 +415,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if not prepared:
         raise ValueError("No token sequences remained after overlength filtering")
+    resolved_build_id = resolved_build_id or uuid.uuid4().hex
+    if (target_path / "meta.npz").exists():
+        with np.load(target_path / "meta.npz", allow_pickle=False) as previous:
+            if str(previous.get("build_id", "")) == resolved_build_id:
+                raise ValueError(
+                    f"Dataset build '{resolved_build_id}' already exists at {target_path}. "
+                    "Dataset builds are immutable; to create a new build, use a distinct build ID."
+                )
 
     train_records, valid_records, test_records = build_splits(
         prepared,
@@ -511,6 +443,7 @@ def main(argv: list[str] | None = None) -> int:
     valid_labels = [0] * len(valid_tokens)
     test_labels = [0] * len(test_tokens)
 
+<<<<<<< HEAD
     resolved_build_id = args.build_id
     if not resolved_build_id and accepted_build_ids:
         resolved_build_id = next(iter(accepted_build_ids))
@@ -549,22 +482,33 @@ def main(argv: list[str] | None = None) -> int:
             list(zip(train_tokens, train_ids)),
             train_labels,
             args.n_chunks,
+=======
+    train_chunks = chunk_sketch_data(
+        list(zip(train_tokens, train_ids)),
+        train_labels,
+        args.n_chunks,
+    )
+    train_chunk_names = [f"train_{idx:03}.npz" for idx in range(len(train_chunks))]
+    chunk_names = train_chunk_names + ["valid.npz", "test.npz"]
+    unexpected = {
+        path.name for path in target_path.glob("*.npz")
+        if path.name not in {*chunk_names, "meta.npz"}
+    }
+    if unexpected:
+        raise ValueError(f"Unexpected untracked dataset chunks at {target_path}: {sorted(unexpected)}")
+    for chunk_idx, (chunk_records, chunk_labels) in enumerate(train_chunks):
+        chunk_tokens = [tokens for tokens, _ in chunk_records]
+        chunk_ids = [sample_id for _, sample_id in chunk_records]
+        chunk_name = train_chunk_names[chunk_idx]
+        save_chunk(
+            target_path / chunk_name,
+            chunk_tokens,
+            chunk_labels.tolist(),
+            chunk_ids,
+>>>>>>> 59b0fe3f0e28f0e53ffba5988a6b9911698e1d8c
         )
-        train_chunk_names: list[str] = []
-        train_chunk_counts: list[int] = []
-        for chunk_idx, (chunk_records, chunk_labels) in enumerate(train_chunks):
-            chunk_tokens = [tokens for tokens, _ in chunk_records]
-            chunk_ids = [sample_id for _, sample_id in chunk_records]
-            chunk_name = f"train_{chunk_idx:03}_{safe_build_id}.npz"
-            train_chunk_names.append(chunk_name)
-            train_chunk_counts.append(len(chunk_tokens))
-            save_chunk(
-                staging_dir / chunk_name,
-                chunk_tokens,
-                chunk_labels.tolist(),
-                chunk_ids,
-            )
 
+<<<<<<< HEAD
         valid_chunk_name = f"valid_{safe_build_id}.npz"
         test_chunk_name = f"test_{safe_build_id}.npz"
         save_chunk(staging_dir / valid_chunk_name, valid_tokens, valid_labels, valid_ids)
@@ -717,11 +661,104 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if staging_dir.exists():
             shutil.rmtree(staging_dir, ignore_errors=True)
+=======
+    save_chunk(target_path / "valid.npz", valid_tokens, valid_labels, valid_ids)
+    save_chunk(target_path / "test.npz", test_tokens, test_labels, test_ids)
+>>>>>>> 59b0fe3f0e28f0e53ffba5988a6b9911698e1d8c
 
+    chunk_checksums = {
+        name: compute_chunk_checksum(target_path / name) for name in chunk_names
+    }
+    split_hashes = {
+        "train": compute_split_hash(train_ids),
+        "valid": compute_split_hash(valid_ids),
+        "test": compute_split_hash(test_ids),
+    }
+    split_counts = {
+        "train": len(train_tokens),
+        "valid": len(valid_tokens),
+        "test": len(test_tokens),
+    }
+    dataset_fingerprint = compute_dataset_fingerprint(
+        build_id=resolved_build_id,
+        dictionary_fingerprint=current_dict_fingerprint,
+        split_hashes=split_hashes,
+        split_counts=split_counts,
+        train_chunks=train_chunk_names,
+        valid_chunks=["valid.npz"],
+        test_chunks=["test.npz"],
+        format_type="tok_dict",
+        chunk_checksums=chunk_checksums,
+        schema_version=2,
+    )
+    metadata_path = target_path / f".meta_{uuid.uuid4().hex}.tmp.npz"
+    np.savez(
+        metadata_path,
+        is_published=bool(current_dict_fingerprint) and sources_attested,
+        build_id=resolved_build_id,
+        dictionary_fingerprint=current_dict_fingerprint,
+        dataset_fingerprint=dataset_fingerprint,
+        split_hash_train=split_hashes["train"],
+        split_hash_valid=split_hashes["valid"],
+        split_hash_test=split_hashes["test"],
+        train_chunks=np.asarray(train_chunk_names, dtype=object),
+        train_chunk_counts=np.asarray([len(chunk[0]) for chunk in train_chunks], dtype=np.int32),
+        valid_chunks=np.asarray(["valid.npz"], dtype=object),
+        valid_chunk_counts=np.asarray([len(valid_tokens)], dtype=np.int32),
+        test_chunks=np.asarray(["test.npz"], dtype=object),
+        test_chunk_counts=np.asarray([len(test_tokens)], dtype=np.int32),
+        chunk_checksums=json.dumps(chunk_checksums, sort_keys=True),
+        schema_version=2,
+        format="tok_dict",
+        codebook_size=codebook_size,
+        motion_token_offset=motion_token_offset,
+        pad_token_id=pad_token_id,
+        sep_token_id=sep_token_id,
+        sos_token_id=sos_token_id,
+        eos_token_id=eos_token_id,
+        vocab_size=vocab_size,
+        codebook_metadata=np.asarray(codebook_metadata, dtype=object),
+        class_names=np.asarray(["anime"], dtype=object),
+        n_classes=int(args.n_classes),
+        n_samples_train=len(train_tokens),
+        n_samples_valid=len(valid_tokens),
+        n_samples_test=len(test_tokens),
+        max_length=int(args.max_length),
+        overlength_policy=overlength_policy,
+        error_feedback=error_feedback,
+        source_type=source_type,
+        n_samples_rejected=len(rejected),
+    )
+    os.replace(metadata_path, target_path / "meta.npz")
+    report = {
+        "schema_version": 2,
+        "build_id": resolved_build_id,
+        "dictionary_fingerprint": current_dict_fingerprint,
+        "dataset_fingerprint": dataset_fingerprint,
+        "is_published": bool(current_dict_fingerprint) and sources_attested,
+        "source_dir": str(source_path),
+        "source_type": source_type,
+        "manifest": str(manifest_path) if manifest_path else None,
+        "target_dir": str(target_path),
+        "max_length": int(args.max_length),
+        "overlength_policy": overlength_policy,
+        "error_feedback": error_feedback,
+        "accepted": len(prepared),
+        "rejected": rejected,
+        "split_counts": split_counts,
+        "split_hashes": split_hashes,
+        "train_chunks": train_chunk_names,
+        "valid_chunks": ["valid.npz"],
+        "test_chunks": ["test.npz"],
+        "chunk_checksums": chunk_checksums,
+    }
+    (target_path / "preparation_report.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     print(f"Saved tok-dict Sketchformer data (build_id={resolved_build_id}) to {target_path}")
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

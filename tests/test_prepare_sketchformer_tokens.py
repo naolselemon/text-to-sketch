@@ -70,64 +70,6 @@ class PrepareSketchformerTokensTest(unittest.TestCase):
 
         self.assertAlmostEqual(float(decoded[:-1, 0].sum()), 0.2, places=6)
 
-    def test_parse_args_defaults_and_flags(self) -> None:
-        from prep_data.prepare_sketchformer_tokens import parse_args
-
-        args = parse_args([])
-        self.assertTrue(args.reject_unexpected_files)
-        self.assertIsNone(args.manifest)
-        self.assertIsNone(args.build_id)
-
-        args = parse_args(["--no-reject-unexpected-files", "--build-id", "b1", "--manifest", "m.jsonl"])
-        self.assertFalse(args.reject_unexpected_files)
-        self.assertEqual(args.build_id, "b1")
-        self.assertEqual(args.manifest, "m.jsonl")
-
-    def test_discover_manifest_finds_file_in_dir_or_parent(self) -> None:
-        from prep_data.prepare_sketchformer_tokens import discover_manifest
-
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            tokens_dir = tmp_path / "tokens"
-            tokens_dir.mkdir()
-            manifest = tmp_path / "manifest.jsonl"
-            manifest.write_text("{}", encoding="utf-8")
-
-            found = discover_manifest(tokens_dir)
-            self.assertEqual(found, manifest)
-
-    def test_discover_manifest_finds_preprocessing_manifest(self) -> None:
-        from prep_data.prepare_sketchformer_tokens import discover_manifest
-
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            tokens_dir = tmp_path / "tokens"
-            tokens_dir.mkdir()
-            manifest = tmp_path / "preprocessing_manifest.jsonl"
-            manifest.write_text("{}", encoding="utf-8")
-
-            found = discover_manifest(tokens_dir)
-            self.assertEqual(found, manifest)
-
-    def test_load_manifest_records_parses_jsonl_and_detects_duplicates(self) -> None:
-        import json
-        from prep_data.prepare_sketchformer_tokens import load_manifest_records
-
-        with tempfile.TemporaryDirectory() as tmp:
-            manifest = Path(tmp) / "manifest.jsonl"
-            records = [{"sample_id": "s1", "status": "accepted"}, {"sample_id": "s2", "status": "rejected"}]
-            manifest.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
-
-            loaded = load_manifest_records(manifest)
-            self.assertEqual(len(loaded), 2)
-            self.assertEqual(loaded[0]["sample_id"], "s1")
-
-            # Duplicate check
-            dup_manifest = Path(tmp) / "dup.jsonl"
-            dup_manifest.write_text('{"sample_id": "s1"}\n{"sample_id": "s1"}\n', encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "Duplicate drawing IDs detected"):
-                load_manifest_records(dup_manifest)
-
 
 if __name__ == "__main__":
     unittest.main()

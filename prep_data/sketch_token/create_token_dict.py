@@ -14,6 +14,7 @@ import sys
 import warnings
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from sklearn.cluster import MiniBatchKMeans
@@ -346,7 +347,7 @@ def main() -> int:
     npy_path, meta_path = save_codebook(
         codebook,
         Path(args.output_dir),
-        K=int(args.K),
+        K=len(codebook),
         n_samples=len(stroke5_arrays),
     )
     print(f"Saved codebook: {npy_path}")
