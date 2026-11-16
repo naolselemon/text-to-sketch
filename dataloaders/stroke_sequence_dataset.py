@@ -54,59 +54,12 @@ class StrokeSequenceDataset(Dataset):
         self.lineage = lineage
         self.verify_integrity = bool(verify_integrity)
         self.allow_unverified = bool(allow_unverified)
-<<<<<<< HEAD
-        self._cache: OrderedDict[Path, tuple[dict[str, np.ndarray], float]] = OrderedDict()
-
-        self.metadata = self._load_metadata()
-        self._verify_metadata()
-=======
         self._cache: OrderedDict[Path, tuple[dict[str, np.ndarray], float, int]] = OrderedDict()
 
         self.metadata = self._load_metadata()
->>>>>>> 59b0fe3f0e28f0e53ffba5988a6b9911698e1d8c
         self.declared_checksums: dict[str, str] = self._resolve_chunk_checksums()
         self.files = self._resolve_files(train_pattern, valid_file, test_file)
         self.index = self._build_index()
-
-    def _resolve_chunk_checksums(self) -> dict[str, str]:
-        if self.lineage is not None:
-            lineage_root = self.lineage.metadata.get("root") if hasattr(self.lineage, "metadata") and self.lineage.metadata else None
-            if lineage_root:
-                try:
-                    if Path(lineage_root).resolve() != self.root.resolve():
-                        raise ValueError(
-                            f"DataLoader root mismatch: dataset initialized with {self.root} "
-                            f"but lineage was verified for {lineage_root}"
-                        )
-                except Exception as e:
-                    if isinstance(e, ValueError):
-                        raise
-            meta_build_id = str(self.metadata.get("build_id", "")).strip()
-            lineage_build_id = str(getattr(self.lineage, "build_id", "")).strip()
-            if meta_build_id and lineage_build_id and meta_build_id != lineage_build_id:
-                raise ValueError(
-                    f"DataLoader build_id mismatch: dataset has build_id '{meta_build_id}' "
-                    f"but lineage has '{lineage_build_id}'"
-                )
-            if not getattr(self.lineage, "is_verified", False) and not self.allow_unverified:
-                raise ValueError(
-                    "Provided dataset lineage is unverified. Pass allow_unverified=True to permit loading."
-                )
-
-        declared_checksums: dict[str, str] = {}
-        if self.lineage is not None and getattr(self.lineage, "chunk_checksums", None):
-            declared_checksums = {str(k): str(v) for k, v in self.lineage.chunk_checksums.items()}
-        elif "chunk_checksums" in self.metadata:
-            raw = self.metadata["chunk_checksums"]
-            if isinstance(raw, str):
-                try:
-                    declared_checksums = json.loads(raw)
-                except Exception:
-                    pass
-            elif isinstance(raw, dict):
-                declared_checksums = {str(k): str(v) for k, v in raw.items()}
-
-        return declared_checksums
 
     def _resolve_chunk_checksums(self) -> dict[str, str]:
         if self.lineage is not None:

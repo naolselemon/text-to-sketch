@@ -1668,7 +1668,6 @@ class ProvenanceLineageTest(unittest.TestCase):
             )
         self.assertIn("classification.enabled", str(cm.exception))
 
-<<<<<<< HEAD
     def test_29_finding1_stroke3_checkpoint_saving_and_token_provenance(self):
         """Test Finding 1: Stroke-3 lineage saves checkpoints without dictionary_fingerprint, while token requires it."""
         model = DummyModel(dim=16)
@@ -2934,13 +2933,6 @@ class ProvenanceLineageTest(unittest.TestCase):
             self.assertTrue(res)
             self.assertTrue(any("unverified" in str(w.message).lower() for w in ws))
 
-=======
->>>>>>> 59b0fe3f0e28f0e53ffba5988a6b9911698e1d8c
 
 if __name__ == "__main__":
     unittest.main()
-
-<<<<<<< HEAD
-=======
-
->>>>>>> 59b0fe3f0e28f0e53ffba5988a6b9911698e1d8c

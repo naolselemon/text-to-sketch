@@ -58,7 +58,6 @@ class DatasetLineage:
             created_at=str(data.get("created_at", "")),
             metadata=metadata,
             schema_version=int(data.get("schema_version", 2)),
-<<<<<<< HEAD
             is_verified=_validate_is_verified(data.get("is_verified", False), default=False),
         )
 
@@ -86,12 +85,6 @@ def _validate_is_verified(val: Any, default: bool = False) -> bool:
     )
 
 
-=======
-            is_verified=bool(data.get("is_verified", False)),
-        )
-
-
->>>>>>> 59b0fe3f0e28f0e53ffba5988a6b9911698e1d8c
 def compute_chunk_checksum(path: str | Path, chunk_size: int = 65536) -> str:
     """Compute deterministic hex SHA-256 checksum of a chunk file artifact."""
     p = Path(path)
@@ -334,7 +327,6 @@ def load_dataset_lineage(
                 metadata={"is_legacy": True, "root": str(root)},
             )
 
-<<<<<<< HEAD
         missing_dict_fp = format_type in {"tok_dict", "token", "tokens"} and not dictionary_fingerprint
         if missing_dict_fp:
             if not allow_unverified:
@@ -345,11 +337,6 @@ def load_dataset_lineage(
                 UserWarning,
                 stacklevel=2,
             )
-=======
-        if format_type in {"tok_dict", "token", "tokens"} and not dictionary_fingerprint:
-            if not allow_unverified:
-                raise ValueError(f"Dataset metadata at {meta_path} is missing required dictionary_fingerprint")
->>>>>>> 59b0fe3f0e28f0e53ffba5988a6b9911698e1d8c
 
         precomputed_train_hash = str(meta.get("split_hash_train", "")).strip()
         precomputed_valid_hash = str(meta.get("split_hash_valid", "")).strip()
@@ -390,11 +377,8 @@ def load_dataset_lineage(
     lineage_metadata: dict[str, Any] = {"root": str(root)}
     if unexpected_chunks:
         lineage_metadata["unexpected_chunks"] = sorted(unexpected_chunks)
-<<<<<<< HEAD
     if missing_dict_fp:
         lineage_metadata["is_unverified_dictionary"] = True
-=======
->>>>>>> 59b0fe3f0e28f0e53ffba5988a6b9911698e1d8c
 
     if not verify_chunks:
         return DatasetLineage(
@@ -511,11 +495,7 @@ def load_dataset_lineage(
         chunk_checksums=actual_chunk_checksums,
         format=format_type,
         schema_version=schema_version,
-<<<<<<< HEAD
         is_verified=not missing_dict_fp,
-=======
-        is_verified=True,
->>>>>>> 59b0fe3f0e28f0e53ffba5988a6b9911698e1d8c
         metadata=lineage_metadata,
     )
 

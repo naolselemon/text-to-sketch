@@ -18,10 +18,6 @@ from dataloaders.lineage import (
 )
 from prep_data.prepare_sketchformer import build_splits, chunk_sketch_data
 from prep_data.sketch_token.create_token_dict import (
-<<<<<<< HEAD
-    compute_codebook_artifact_checksum,
-=======
->>>>>>> 59b0fe3f0e28f0e53ffba5988a6b9911698e1d8c
     get_token_dict_fingerprint,
     load_codebook_from_dir,
 )
@@ -171,33 +167,6 @@ def main() -> int:
     token_dict_dir = Path(args.token_dict_dir)
     target_path.mkdir(parents=True, exist_ok=True)
 
-<<<<<<< HEAD
-    if args.build_id:
-        target_meta = target_path / "meta.npz"
-        if target_meta.is_file():
-            try:
-                with np.load(target_meta, allow_pickle=True) as existing_meta:
-                    existing_bid = str(existing_meta.get("build_id", "")).strip()
-                    if existing_bid and existing_bid == str(args.build_id).strip():
-                        raise ValueError(
-                            f"Dataset build '{args.build_id}' already exists at {target_path}. "
-                            "Dataset builds are immutable; to create a new build, use a distinct build ID."
-                        )
-            except ValueError:
-                raise
-            except Exception:
-                pass
-        safe_bid = re.sub(r"[^a-zA-Z0-9_.-]", "_", str(args.build_id).strip())
-        if (target_path / "versions" / safe_bid).is_dir():
-            raise ValueError(
-                f"Dataset build '{args.build_id}' already exists in versions archive at {target_path / 'versions' / safe_bid}. "
-                "Dataset builds are immutable; to create a new build, use a distinct build ID."
-            )
-
-    codebook, codebook_metadata = load_codebook_from_dir(token_dict_dir)
-    current_dict_fingerprint = get_token_dict_fingerprint(token_dict_dir)
-    current_codebook_checksum = compute_codebook_artifact_checksum(codebook)
-=======
     if args.build_id and not args.build_id.strip():
         raise ValueError("--build-id must not be empty")
     if (target_path / "meta.npz").exists():
@@ -222,7 +191,6 @@ def main() -> int:
     current_codebook_file_checksum = hashlib.sha256(
         (token_dict_dir / "codebook.npy").read_bytes()
     ).hexdigest()
->>>>>>> 59b0fe3f0e28f0e53ffba5988a6b9911698e1d8c
     codebook_size = int(len(codebook))
     motion_token_offset = 1
     pad_token_id = 0
@@ -270,62 +238,6 @@ def main() -> int:
 
     prepared: list[tuple[np.ndarray, str]] = []
     rejected: list[dict[str, object]] = []
-<<<<<<< HEAD
-    for path, sample_id, record in items_to_process:
-        expected_tokens_sha256 = record.get("tokens_sha256") or record.get("token_sha256")
-        if expected_tokens_sha256:
-            actual_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
-            if actual_sha256 != str(expected_tokens_sha256):
-                raise ValueError(
-                    f"SHA-256 hash mismatch for token file {path}: "
-                    f"expected {expected_tokens_sha256}, got {actual_sha256}"
-                )
-
-        rec_dict_sha256 = (
-            record.get("token_dictionary_sha256")
-            or record.get("token_dict_sha256")
-            or record.get("codebook_sha256")
-        )
-        if rec_dict_sha256 and (current_dict_fingerprint or current_codebook_checksum):
-            val_str = str(rec_dict_sha256).strip()
-            if val_str != current_dict_fingerprint and val_str != current_codebook_checksum:
-                raise ValueError(
-                    f"Token dictionary fingerprint mismatch in manifest record for {sample_id}: "
-                    f"manifest recorded {rec_dict_sha256}, current codebook is {current_dict_fingerprint}"
-                )
-
-        if args.build_id and record.get("build_id"):
-            if str(record["build_id"]) != str(args.build_id):
-                raise ValueError(
-                    f"Build ID mismatch for sample {sample_id}: "
-                    f"manifest recorded {record['build_id']}, expected {args.build_id}"
-                )
-
-        if args.tokens_dir:
-            tokens, embedded_meta = load_token_sequence_with_metadata(path)
-            if embedded_meta:
-                if "tokens_sha256" in embedded_meta:
-                    actual_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
-                    if actual_sha256 != str(embedded_meta["tokens_sha256"]):
-                        raise ValueError(
-                            f"SHA-256 hash mismatch in embedded metadata for {path}: "
-                            f"embedded {embedded_meta['tokens_sha256']}, actual {actual_sha256}"
-                        )
-                if "token_dict_sha256" in embedded_meta and (current_dict_fingerprint or current_codebook_checksum):
-                    val_str = str(embedded_meta["token_dict_sha256"]).strip()
-                    if val_str != current_dict_fingerprint and val_str != current_codebook_checksum:
-                        raise ValueError(
-                            f"Token dictionary fingerprint mismatch in token file {path}: "
-                            f"embedded {embedded_meta['token_dict_sha256']}, current codebook is {current_dict_fingerprint}"
-                        )
-                expected_build = args.build_id or record.get("build_id")
-                if "build_id" in embedded_meta and expected_build:
-                    if str(embedded_meta["build_id"]) != str(expected_build):
-                        raise ValueError(
-                            f"Build ID mismatch in token file {path}: "
-                            f"embedded {embedded_meta['build_id']}, expected {expected_build}"
-                        )
-=======
     sources_attested = True
     for path in file_list:
         sample_id = path.relative_to(source_path).with_suffix("").as_posix()
@@ -376,7 +288,6 @@ def main() -> int:
                     "codebook_sha256", "dictionary_fingerprint",
                 )
             )
->>>>>>> 59b0fe3f0e28f0e53ffba5988a6b9911698e1d8c
         else:
             tokens = encode_stroke5(
                 load_stroke5_file(path),
@@ -443,46 +354,6 @@ def main() -> int:
     valid_labels = [0] * len(valid_tokens)
     test_labels = [0] * len(test_tokens)
 
-<<<<<<< HEAD
-    resolved_build_id = args.build_id
-    if not resolved_build_id and accepted_build_ids:
-        resolved_build_id = next(iter(accepted_build_ids))
-    if not resolved_build_id:
-        resolved_build_id = f"build_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
-
-    safe_build_id = re.sub(r"[^a-zA-Z0-9_.-]", "_", resolved_build_id)
-
-    # Immutability check: Reject reusing an existing build ID
-    meta_path = target_path / "meta.npz"
-    if meta_path.is_file():
-        try:
-            with np.load(meta_path, allow_pickle=True) as existing_meta:
-                existing_bid = str(existing_meta.get("build_id", "")).strip()
-                if existing_bid and existing_bid == resolved_build_id:
-                    raise ValueError(
-                        f"Dataset build '{resolved_build_id}' already exists at {target_path}. "
-                        "Dataset builds are immutable; to create a new build, use a distinct build ID."
-                    )
-        except ValueError:
-            raise
-        except Exception:
-            pass
-
-    existing_version_dir = target_path / "versions" / safe_build_id
-    if existing_version_dir.is_dir():
-        raise ValueError(
-            f"Dataset build '{resolved_build_id}' already exists in versions archive at {existing_version_dir}. "
-            "Dataset builds are immutable; to create a new build, use a distinct build ID."
-        )
-
-    staging_dir = target_path / f".staging_{safe_build_id}"
-    staging_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        train_chunks = chunk_sketch_data(
-            list(zip(train_tokens, train_ids)),
-            train_labels,
-            args.n_chunks,
-=======
     train_chunks = chunk_sketch_data(
         list(zip(train_tokens, train_ids)),
         train_labels,
@@ -505,166 +376,10 @@ def main() -> int:
             chunk_tokens,
             chunk_labels.tolist(),
             chunk_ids,
->>>>>>> 59b0fe3f0e28f0e53ffba5988a6b9911698e1d8c
         )
 
-<<<<<<< HEAD
-        valid_chunk_name = f"valid_{safe_build_id}.npz"
-        test_chunk_name = f"test_{safe_build_id}.npz"
-        save_chunk(staging_dir / valid_chunk_name, valid_tokens, valid_labels, valid_ids)
-        save_chunk(staging_dir / test_chunk_name, test_tokens, test_labels, test_ids)
-
-        for chunk_name, expected_count in zip(train_chunk_names, train_chunk_counts):
-            staged_file = staging_dir / chunk_name
-            if not staged_file.is_file():
-                raise RuntimeError(f"Failed to generate staged chunk: {staged_file}")
-            with np.load(staged_file, allow_pickle=True) as check_data:
-                if len(check_data["x"]) != expected_count:
-                    raise RuntimeError(
-                        f"Staged chunk count mismatch in {staged_file}: expected {expected_count}, got {len(check_data['x'])}"
-                    )
-
-        for name, expected_count in [(valid_chunk_name, len(valid_tokens)), (test_chunk_name, len(test_tokens))]:
-            staged_file = staging_dir / name
-            if not staged_file.is_file():
-                raise RuntimeError(f"Failed to generate staged chunk: {staged_file}")
-            with np.load(staged_file, allow_pickle=True) as check_data:
-                if len(check_data["x"]) != expected_count:
-                    raise RuntimeError(
-                        f"Staged chunk count mismatch in {staged_file}: expected {expected_count}, got {len(check_data['x'])}"
-                    )
-
-        # Compute chunk checksums in staging area before publication
-        chunk_checksums: dict[str, str] = {}
-        for cname in train_chunk_names:
-            chunk_checksums[cname] = compute_chunk_checksum(staging_dir / cname)
-        chunk_checksums[valid_chunk_name] = compute_chunk_checksum(staging_dir / valid_chunk_name)
-        chunk_checksums[test_chunk_name] = compute_chunk_checksum(staging_dir / test_chunk_name)
-
-        if (target_path / "meta.npz").is_file():
-            _snapshot_previous_build(target_path)
-
-        for staged_file in staging_dir.iterdir():
-            if staged_file.is_file() and staged_file.name.endswith(".npz"):
-                dest = target_path / staged_file.name
-                os.replace(staged_file, dest)
-                if staged_file.name in chunk_checksums:
-                    actual_ck = compute_chunk_checksum(dest)
-                    if actual_ck != chunk_checksums[staged_file.name]:
-                        raise RuntimeError(
-                            f"Checksum mismatch after moving {staged_file.name} to {dest}: "
-                            f"expected {chunk_checksums[staged_file.name]}, got {actual_ck}"
-                        )
-
-        split_hashes = {
-            "train": compute_split_hash(train_ids),
-            "valid": compute_split_hash(valid_ids),
-            "test": compute_split_hash(test_ids),
-        }
-        dataset_fingerprint = compute_dataset_fingerprint(
-            build_id=resolved_build_id,
-            dictionary_fingerprint=current_dict_fingerprint or "",
-            split_hashes=split_hashes,
-            split_counts={
-                "train": len(train_tokens),
-                "valid": len(valid_tokens),
-                "test": len(test_tokens),
-            },
-            train_chunks=train_chunk_names,
-            valid_chunks=[valid_chunk_name],
-            test_chunks=[test_chunk_name],
-            format_type="tok_dict",
-            chunk_checksums=chunk_checksums,
-            schema_version=2,
-        )
-
-        temp_meta = target_path / f".meta_{safe_build_id}.tmp.npz"
-        np.savez(
-            temp_meta,
-            is_published=True,
-            build_id=resolved_build_id,
-            dictionary_fingerprint=current_dict_fingerprint or "",
-            dataset_fingerprint=dataset_fingerprint,
-            split_hash_train=split_hashes["train"],
-            split_hash_valid=split_hashes["valid"],
-            split_hash_test=split_hashes["test"],
-            train_chunks=np.asarray(train_chunk_names, dtype=object),
-            train_chunk_counts=np.asarray(train_chunk_counts, dtype=np.int32),
-            valid_chunks=np.asarray([valid_chunk_name], dtype=object),
-            valid_chunk_counts=np.asarray([len(valid_tokens)], dtype=np.int32),
-            test_chunks=np.asarray([test_chunk_name], dtype=object),
-            test_chunk_counts=np.asarray([len(test_tokens)], dtype=np.int32),
-            chunk_checksums=json.dumps(chunk_checksums),
-            schema_version=2,
-            format="tok_dict",
-            codebook_size=codebook_size,
-            motion_token_offset=motion_token_offset,
-            pad_token_id=pad_token_id,
-            sep_token_id=sep_token_id,
-            sos_token_id=sos_token_id,
-            eos_token_id=eos_token_id,
-            vocab_size=vocab_size,
-            codebook_metadata=np.asarray(codebook_metadata, dtype=object),
-            class_names=np.asarray(["anime"], dtype=object),
-            n_classes=int(args.n_classes),
-            n_samples_train=len(train_tokens),
-            n_samples_valid=len(valid_tokens),
-            n_samples_test=len(test_tokens),
-            max_length=int(args.max_length),
-            overlength_policy=overlength_policy,
-            error_feedback=error_feedback,
-            source_type=source_type,
-            n_samples_rejected=len(rejected),
-        )
-        os.replace(temp_meta, target_path / "meta.npz")
-
-        # Copy valid and test chunks as valid.npz and test.npz for backwards compatibility with unconfigured tools
-        try:
-            shutil.copy2(target_path / valid_chunk_name, target_path / f".valid_{safe_build_id}.tmp.npz")
-            os.replace(target_path / f".valid_{safe_build_id}.tmp.npz", target_path / "valid.npz")
-            shutil.copy2(target_path / test_chunk_name, target_path / f".test_{safe_build_id}.tmp.npz")
-            os.replace(target_path / f".test_{safe_build_id}.tmp.npz", target_path / "test.npz")
-        except Exception:
-            pass
-
-        report = {
-            "schema_version": 2,
-            "build_id": resolved_build_id,
-            "source_dir": str(source_path),
-            "source_type": source_type,
-            "target_dir": str(target_path),
-            "max_length": int(args.max_length),
-            "overlength_policy": overlength_policy,
-            "error_feedback": error_feedback,
-            "accepted": len(prepared),
-            "rejected": rejected,
-            "split_counts": {
-                "train": len(train_tokens),
-                "valid": len(valid_tokens),
-                "test": len(test_tokens),
-            },
-            "split_hashes": split_hashes,
-            "dataset_fingerprint": dataset_fingerprint,
-            "train_chunks": train_chunk_names,
-            "train_chunk_counts": train_chunk_counts,
-            "valid_chunks": [valid_chunk_name],
-            "test_chunks": [test_chunk_name],
-            "chunk_checksums": chunk_checksums,
-            "dictionary_fingerprint": current_dict_fingerprint,
-        }
-        temp_report = target_path / f".report_{safe_build_id}.tmp.json"
-        temp_report.write_text(
-            json.dumps(report, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        os.replace(temp_report, target_path / "preparation_report.json")
-    finally:
-        if staging_dir.exists():
-            shutil.rmtree(staging_dir, ignore_errors=True)
-=======
     save_chunk(target_path / "valid.npz", valid_tokens, valid_labels, valid_ids)
     save_chunk(target_path / "test.npz", test_tokens, test_labels, test_ids)
->>>>>>> 59b0fe3f0e28f0e53ffba5988a6b9911698e1d8c
 
     chunk_checksums = {
         name: compute_chunk_checksum(target_path / name) for name in chunk_names
