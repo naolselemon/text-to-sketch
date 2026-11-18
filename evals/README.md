@@ -234,3 +234,67 @@ standalone benchmarking continues honoring explicit `--run-name` values.
 CPU fixture reports test reproducibility, validation and labeling. Their scores
 are not model-quality evidence. Real-checkpoint generation, image inspection and
 acceptance remain the maintainer's hand-off.
+
+# Free-running checkpoint selection
+
+Root `best.pt` is a stage-dependent validation-loss diagnostic: its tracker resets
+at curriculum stage boundaries. `selected/model.*` is the checkpoint selected by
+complete free-running drawings and their quality. Next-token loss remains a
+training diagnostic. Selection alone does not establish satisfactory model quality.
+
+The versioned rule `free-running-selection-v1` ranks eligible candidates by:
+
+1. Higher mean `drawing_score` across the entire frozen evaluation population.
+2. Higher completion rate.
+3. Higher minimum bucket-mean `drawing_score` across populated length buckets.
+4. Earlier recorded global step.
+5. Lexicographic candidate ID.
+
+Empty buckets are excluded from the minimum. Each complete drawing receives
+`geometry_f1_2px × (1 − out_of_canvas_fraction)`; incomplete drawings receive zero.
+The versioned clipping penalty measures continuous drawn-segment length outside
+the target-normalized 256×256 canvas before rasterization, excluding pen-up jumps.
+Incorrect extra strokes affect quality without automatically making a drawing
+syntactically incomplete.
+
+Float criteria use a finite, nonnegative `--tolerance` (default `1e-6`). At each
+criterion, sort descending and form a group containing the best remaining value
+and all values within tolerance of that anchor. Refine each group using the next
+criterion before continuing to the next anchor. Global step and candidate ID use
+exact comparisons. For example, scores `0.90`, `0.84`, `0.78` with tolerance `0.10`
+group the first two; the third remains separate even though it is close to `0.84`.
+This avoids non-transitive pairwise approximate comparisons and produces the same
+full ranking and tie-resolution trace regardless of candidate input order.
+
+Selection checks each report against the supplied frozen `valid` manifest, matching
+dictionary, inference settings, completeness/scoring versions, target identities,
+saved token evidence, aggregates, image artifacts and actual checkpoint hashes.
+Candidates require IDs and recorded nonnegative integer global steps. Non-quality
+and test reports are always ineligible, as are partial evaluation reports. Duplicate
+candidate IDs invalidate every conflicting report. Rejections are recorded; when no
+candidate is eligible, selection writes a report with no winner and exits nonzero
+without falling back to loss.
+
+Once candidate benchmarks and a shared validation manifest have been produced:
+
+```bash
+.venv/bin/python -B evals/select_checkpoint.py select \
+  --evaluation-manifest runs/free-running-selection/validation/evaluation_manifest.json \
+  --reports-dir runs/free-running-selection/validation \
+  --codebook-path data/processed/sketch_token/codebook.npy \
+  --output runs/free-running-selection/selection.json \
+  --materialize
+```
+
+`selection.json` records the rule, tolerance, frozen identities, full ranking,
+tie-resolution trace, rejected reports, artifact hashes and winner. `--materialize`
+atomically publishes a verified byte-for-byte copy as `selected/model.pt` or
+`selected/model.safetensors`, preserving its actual checkpoint format. Existing
+selection outputs or materialization directories are refused.
+
+The CPU selection tests use temporary synthetic report fixtures with known rankings.
+These scores exercise selection mechanics and are never model-quality evidence.
+Checkpoints marked as fixtures remain non-quality and cannot pass production
+selection; the CLI has no fixture bypass. The maintainer performs real-checkpoint
+generation, image review and model acceptance. If the rule changes after review,
+version it and rerun selection consistently across candidates.
