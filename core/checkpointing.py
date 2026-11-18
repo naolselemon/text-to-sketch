@@ -32,6 +32,7 @@ def save_checkpoint(
     step: int = 0,
     config: Mapping[str, Any] | None = None,
     metrics: Mapping[str, Any] | None = None,
+    training_origin: str | None = None,
 ) -> Path:
     """Save a training checkpoint."""
 
@@ -42,9 +43,12 @@ def save_checkpoint(
         "model": model.state_dict(),
         "epoch": int(epoch),
         "step": int(step),
+        "global_step": int(step),
         "metrics": dict(metrics or {}),
         "config": dict(config or {}),
     }
+    if training_origin is not None:
+        payload['training_origin'] = training_origin
     if optimizer is not None:
         payload["optimizer"] = optimizer.state_dict()
     scheduler_obj = getattr(scheduler, "scheduler", scheduler)

@@ -19,6 +19,7 @@ training:
 
 checkpointing:
   enabled: true
+  retain_candidates: false
   monitor: val/token_loss
   mode: min
   save_top_k: 3

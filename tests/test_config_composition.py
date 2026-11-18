@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from scripts.sketchformer.config import compose_training_config
 
@@ -29,6 +32,22 @@ class ConfigCompositionTest(unittest.TestCase):
         self.assertEqual(model_tokens["eos_token_id"], 1003)
         self.assertEqual(model_tokens["vocab_size"], 1004)
         self.assertEqual(config["trainer"]["checkpointing"]["monitor"], "val/token_loss")
+        self.assertFalse(config["trainer"]["checkpointing"]["retain_candidates"])
+
+    def test_long_experiment_retains_candidates(self):
+        config = compose_training_config("configs/train.yaml", experiment="anime_tok_dict_long")
+        self.assertTrue(config["trainer"]["checkpointing"]["retain_candidates"])
+
+    def test_frozen_json_config_preserves_scientific_notation_and_settings(self):
+        config = compose_training_config("configs/train.yaml", experiment="anime_tok_dict_long")
+        config['experiment'].pop('overrides', None)
+        config['model']['architecture']['layer_norm_eps'] = 1e-5
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'inference_config.json'
+            path.write_text(json.dumps(config))
+            restored = compose_training_config(path)
+        self.assertEqual(restored, config)
+        self.assertIsInstance(restored['model']['architecture']['layer_norm_eps'], float)
 
 
 if __name__ == "__main__":

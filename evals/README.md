@@ -298,3 +298,61 @@ Checkpoints marked as fixtures remain non-quality and cannot pass production
 selection; the CLI has no fixture bypass. The maintainer performs real-checkpoint
 generation, image review and model acceptance. If the rule changes after review,
 version it and rerun selection consistently across candidates.
+
+# Retained candidates and sequential validation
+
+`trainer.checkpointing.retain_candidates` defaults to `false` and is enabled by
+`anime_tok_dict_long`. Every validation boundary retains an immutable model-only
+checkpoint at `candidates/<stage>/epoch-XXXX-step-XXXXXX.pt`, with configuration,
+training origin, epoch, global step and stage maximum length. Optimizer and scheduler
+states are excluded. After successful atomic saving, `candidates/manifest.jsonl`
+registers its identity, path, stage, epoch, global step, stage maximum length, SHA256
+and validation loss. Collisions are refused; candidates are never overwritten or
+deleted. Resume reports unregistered checkpoints and temporary files left by an
+interrupted save. `last.pt`, stage-local loss-monitored `best.pt`, and final-stage
+early stopping keep their existing behavior.
+
+Evaluate retained checkpoints using one shared complete validation population:
+
+```bash
+.venv/bin/python -B evals/select_checkpoint.py evaluate \
+  --candidate-manifest weights/finetuned/sketchformer-tok-dict-anime-4096/candidates/manifest.jsonl \
+  --experiment anime_tok_dict_long \
+  --data-root data/processed/sketchformer-ready-data/tok-dict-4096 \
+  --codebook-path data/processed/sketch_token/codebook.npy \
+  --device cuda --precision 16-mixed \
+  --max-generation-length 4096 --seed 42 --num-plots 50 \
+  --output-dir runs/free-running-selection/validation
+```
+
+For older checkpoints, replace `--candidate-manifest` with
+`--checkpoints <a.pt> <b.pt> --training-origin real_training`. These candidate
+sources are mutually exclusive. IDs come from checkpoint metadata or the filename
+and hash. Global steps must come from checkpoint metadata or a candidate-manifest
+entry; timestamps and default zero are never used. Relative paths in a supplied
+manifest resolve against its directory. Supplied hashes, IDs and steps must agree
+with embedded metadata. An origin override only fills missing origin: known
+fixture, smoke, sanity, random-init and partial-load reasons remain non-quality.
+
+Before inference, the wrapper freezes `evaluation_manifest.json`, the smaller
+`comparison_manifest.json`, `inference_config.json`, and verified `candidates.json`.
+By default the evaluation population is the entire `valid` split. `--eval-samples N`
+freezes and evaluates a deterministic subset using seed 42 unless overridden.
+Every stage uses the same inference architecture and generation limit, with strict
+loading, greedy free-running decoding, and saved target, predicted and validation
+tokens. Candidate evaluation is sequential.
+
+Each candidate has a directory containing reserved attempt identities, process
+logs, reports, numbered comparison images, and an `images_index.json` linked from
+its report. Non-quality attempt names start with `not-quality-`. Complete artifacts
+are skipped only after verifying their checkpoint hash, frozen settings, population,
+token evidence, aggregates, labels, comparison order and images. Interrupted or
+invalid attempts remain in place and retries use a new attempt name. Changed
+settings or candidate identities require a fresh output directory. Each invocation
+writes `evaluation_attempt_XXXX.json` with complete, skipped and failed outcomes;
+any requested candidate failure produces a nonzero exit after the others finish.
+
+CPU orchestration tests use tiny checkpoints with fixture metadata. Those reports
+remain non-quality and their scores are not model-quality evidence. Real generation,
+candidate image inspection, ranking review and model acceptance belong to the
+maintainer. Generated weights, data and reports stay out of commits.

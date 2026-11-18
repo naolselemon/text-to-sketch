@@ -196,13 +196,33 @@ def parser():
     pick.add_argument('--output', type=Path, required=True)
     pick.add_argument('--tolerance', type=float, default=1e-6)
     pick.add_argument('--materialize', action='store_true')
+    evaluate = commands.add_parser('evaluate', help='Evaluate retained candidates sequentially on frozen valid drawings')
+    source = evaluate.add_mutually_exclusive_group(required=True)
+    source.add_argument('--candidate-manifest', type=Path)
+    source.add_argument('--checkpoints', nargs='+', type=Path)
+    evaluate.add_argument('--config', default='configs/train.yaml')
+    evaluate.add_argument('--experiment', default='anime_tok_dict_long')
+    evaluate.add_argument('--data-root', type=Path, required=True)
+    evaluate.add_argument('--codebook-path', type=Path, required=True)
+    evaluate.add_argument('--device', default='auto')
+    evaluate.add_argument('--precision', default=None)
+    evaluate.add_argument('--max-generation-length', type=int, default=4096)
+    evaluate.add_argument('--seed', type=int, default=42)
+    evaluate.add_argument('--num-plots', type=int, default=50)
+    evaluate.add_argument('--eval-samples', type=int, default=None)
+    evaluate.add_argument('--training-origin', choices=['real_training'])
+    evaluate.add_argument('--smoke-test', action='store_true')
+    evaluate.add_argument('--output-dir', type=Path, required=True)
     return result
 
 
 def main():
     args = parser().parse_args()
     try:
-        return {'select': select}[args.command](args)
+        if args.command == 'evaluate':
+            from evals.candidate_evaluation import evaluate
+            return evaluate(args)
+        return select(args)
     except (ValueError, OSError, KeyError, TypeError) as exc:
         print(f'[selection] {exc}', file=sys.stderr)
         return 2

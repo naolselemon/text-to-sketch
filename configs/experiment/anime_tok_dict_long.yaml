@@ -67,6 +67,7 @@ overrides:
           learning_rate: 0.000005
           trainable: all
     checkpointing:
+      retain_candidates: true
       monitor: val/token_loss
       mode: min
       save_last: true
