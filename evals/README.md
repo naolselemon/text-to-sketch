@@ -188,3 +188,49 @@ per-sample quantization/reconstruction correlations, complexity-colored embeddin
 visualizations, and a consolidated interpretation with Week 3 recommendations.
 The exported IDs/embeddings support that work. None of these empirical findings are
 claimed by CPU regression tests, and they must not be inferred from synthetic runs.
+
+# Frozen evaluation identities and evidence labels
+
+Benchmark reports retain `schema_version: 2` and their existing output names.
+`--evaluation-manifest PATH` creates or reuses a frozen evaluation population;
+`--eval-samples N` chooses a deterministic subset across populated length buckets
+and restricts inference to those IDs. Without a subset, the entire requested
+split is evaluated. The evaluation manifest is separate from the smaller
+comparison-image manifest. Stored targets are validated before inference, with
+truncation disabled and internal padding or missing SOS/EOS rejected.
+
+The manifest contains ordered IDs, target lengths and token hashes, split-file
+hashes, dictionary hash and token layout, seed, code revision, and versioned
+completeness/scoring rules. Canonical inference settings are stored alongside
+their fingerprint so mismatches identify the differing fields. Configuration
+hash, device and batch size remain provenance. Standalone benchmarking resolves
+an omitted generation limit to model capacity; direct `run_free_running` callers
+retain their existing batch-derived default.
+
+Use `--save-predictions` to retain `target_tokens`, `predicted_tokens`, and full
+`validation_tokens`, including initial SOS and unexpected post-EOS output.
+Candidate identity, checkpoint hash and global step accompany this evidence.
+`evals.selection_common.validate_report` checks population coverage, target and
+dictionary identity, inference settings, actual checkpoint hashes, recomputed
+drawing scores, aggregates, bucket totals and expected image files. A partial
+`--limit-batches` diagnostic cannot validate against a complete manifest.
+
+Reports are `quality` or `not_quality`. Applicable non-quality reasons have the
+fixed order `random_init`, `smoke_test`, `sanity_preset`, `partial_load`,
+`unknown_training_origin`. `--smoke-test` explicitly labels a diagnostic run;
+fixture metadata, the `smoke_test` preset and `memorize10_long` are also recognized.
+Strict loading alone does not establish training origin. For older checkpoints,
+`--training-origin real_training` fills missing origin only. Embedded metadata
+wins conflicts, recorded through `origin_override_ignored`; known fixture,
+smoke, sanity, random-init and partial-load markers remain non-quality.
+
+`--image-captions` adds checkpoint, report kind/reasons, seed and generation
+settings to the existing sample caption. Numbered image names and comparison
+order are preserved. Each run's plot directory contains `images_index.json`,
+linked from the report, with image paths, sample IDs, checkpoint hash and settings.
+The wrapper naming helper prefixes non-quality runs with `not-quality-`;
+standalone benchmarking continues honoring explicit `--run-name` values.
+
+CPU fixture reports test reproducibility, validation and labeling. Their scores
+are not model-quality evidence. Real-checkpoint generation, image inspection and
+acceptance remain the maintainer's hand-off.

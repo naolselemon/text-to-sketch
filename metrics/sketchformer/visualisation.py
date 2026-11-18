@@ -234,6 +234,7 @@ def save_reconstruction_examples(
     output_dir: str | Path,
     *,
     prefix: str = "reconstruction",
+    caption_metadata: dict | None = None,
 ) -> list[Path]:
     """Save a numbered plot for each reconstruction example."""
 
@@ -246,6 +247,8 @@ def save_reconstruction_examples(
             f"sample={example.sample_id or example.source_index} "
             f"length={example.length} label={example.label}"
         )
+        if caption_metadata:
+            title += '\n' + ' '.join(f'{key}={value}' for key, value in caption_metadata.items())
         output_path = directory / f"{prefix}_{index:03d}.png"
         saved.append(save_reconstruction_pair(example, output_path, title=title))
     return saved

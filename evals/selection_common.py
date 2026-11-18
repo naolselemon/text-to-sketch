@@ -200,6 +200,31 @@ def validate_report(report_path, manifest, codebook_path, candidate=None):
     require_same(file_sha256(checkpoint), identity['sha256'], 'checkpoint hash')
     require_same(provenance['checkpoint_sha256'], identity['sha256'], 'checkpoint provenance')
     require_same(str(Path(provenance['checkpoint']).resolve()), str(checkpoint.resolve()), 'checkpoint path')
+    from evals.report_evidence import checkpoint_metadata, classify_report
+    metadata = checkpoint_metadata(checkpoint)
+    classification = classify_report(metadata,
+        random_init=provenance.get('random_initialization', False),
+        smoke_test=provenance.get('smoke_test', False), experiment=provenance.get('experiment', ''),
+        partial_load=provenance.get('partial_loading_override', False) or not provenance.get('checkpoint_load', {'strict': True})['strict'],
+        training_origin_override=provenance.get('training_origin_override'))
+    for key in ('report_kind', 'not_quality_reasons'):
+        require_same(report[key], classification[key], 'report evidence ' + key)
+    for key in ('training_origin', 'origin_override_ignored'):
+        if key in report:
+            require_same(report[key], classification[key], 'report evidence ' + key)
+    embedded_step = metadata.get('global_step', metadata.get('step'))
+    if embedded_step is not None:
+        require_same(identity['global_step'], embedded_step, 'checkpoint global step')
+    if identity.get('manifest_path'):
+        registry_path = Path(identity['manifest_path'])
+        entries = read_json(registry_path)
+        entries = [r for r in entries if r['candidate_id'] == identity['candidate_id']]
+        if len(entries) != 1:
+            raise ValueError('Candidate registry has missing/duplicate identity')
+        for key in ('candidate_id', 'global_step', 'path', 'sha256'):
+            require_same(identity[key], entries[0][key], 'candidate registry ' + key)
+    elif embedded_step is None and identity['global_step'] is not None:
+        raise ValueError('Missing global step metadata requires a candidate manifest')
     fr = report['free_running']
     records = read_jsonl(path.parent / fr['per_sample_path'])
     actual, expected = records_by_id(records), records_by_id(manifest['samples'])
@@ -209,6 +234,8 @@ def validate_report(report_path, manifest, codebook_path, candidate=None):
     layout = manifest['dictionary']['token_layout']
     limit = manifest['inference_settings']['generation_limit']
     for key, row in actual.items():
+        for field, candidate_field in (('candidate_id', 'candidate_id'), ('global_step', 'global_step'), ('checkpoint_sha256', 'sha256')):
+            require_same(row[field], identity[candidate_field], 'record candidate ' + field)
         target = row['target_tokens']
         if len(target) != expected[key]['target_length'] or token_sha256(target) != expected[key]['target_sha256']:
             raise ValueError('Changed target evidence: ' + key)

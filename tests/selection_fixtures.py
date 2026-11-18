@@ -38,6 +38,7 @@ def synthetic_report(root, name='a', step=1, prediction=None, split='valid'):
     prediction = prediction or target
     checked = score_drawing(prediction, target, book, generation_limit=8)
     record = dict(**row, **checked, target_tokens=target, predicted_tokens=prediction[:prediction.index(7) + 1] if 7 in prediction else prediction,
+                  candidate_id=name, global_step=step, checkpoint_sha256=candidate['sha256'],
                   validation_tokens=prediction, token_accuracy=1., exact_match=float(prediction == target),
                   eos_rate=float(7 in prediction), max_length_hit=float(7 not in prediction and len(prediction) >= 8))
     (root / (name + '_per_sample.jsonl')).write_text(json.dumps(record) + '\n')

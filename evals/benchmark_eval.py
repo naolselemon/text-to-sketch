@@ -53,6 +53,7 @@ from evals.selection_common import (
     build_evaluation_manifest, dictionary_identity, dictionary_layout,
     freeze_manifest, inference_settings, json_sha256, restrict_loader,
 )
+from evals.report_evidence import checkpoint_metadata, classify_report
 from metrics.sketchformer.reconstruction import (
     collect_generated_reconstruction_examples,
 )
@@ -489,7 +490,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--evaluation-manifest", type=Path)
     parser.add_argument("--eval-samples", type=int)
     parser.add_argument("--candidate-id")
+    parser.add_argument("--candidate-registry", type=Path)
     parser.add_argument("--global-step", type=int)
+    parser.add_argument("--smoke-test", action="store_true")
+    parser.add_argument("--training-origin", choices=['real_training'])
+    parser.add_argument("--image-captions", action="store_true")
     parser.add_argument("--split", choices=["valid", "test"], default="valid")
     parser.add_argument("--data-root", default=None)
     parser.add_argument(
@@ -706,6 +711,17 @@ def main() -> int:
             strict=not args.allow_partial_checkpoint,
         )
         print(f"[benchmark] loaded checkpoint: {args.checkpoint}")
+    metadata = checkpoint_metadata(PROJECT_ROOT / args.checkpoint) if args.checkpoint else {}
+    embedded_step = metadata.get('global_step', metadata.get('step'))
+    if args.global_step is not None and embedded_step is not None and args.global_step != embedded_step:
+        raise ValueError('global-step conflicts with checkpoint metadata')
+    if args.global_step is None:
+        args.global_step = embedded_step
+    if args.candidate_id is None and args.checkpoint:
+        args.candidate_id = metadata.get('candidate_id') or f'{Path(args.checkpoint).stem}-{_file_sha256(PROJECT_ROOT / args.checkpoint)[:12]}'
+    classification = classify_report(metadata, random_init=not bool(args.checkpoint),
+        smoke_test=args.smoke_test, experiment=config.get('experiment', {}).get('name', args.experiment),
+        partial_load=args.allow_partial_checkpoint, training_origin_override=args.training_origin)
     model = maybe_compile_model(raw_model.to(device), config["model"])
     loss_fn = build_loss(config["optimizer"]).to(device)
     codebook = None
@@ -732,6 +748,10 @@ def main() -> int:
             "device": str(device),
             "checkpoint_load": checkpoint_load,
             "random_initialization": not bool(args.checkpoint),
+            "batch_size": config['data']['batching']['eval_batch_size'],
+            "smoke_test": args.smoke_test,
+            "training_origin_override": args.training_origin,
+            "partial_loading_override": args.allow_partial_checkpoint,
         }
     )
     files = sorted(loader.dataset.dataset.files)
@@ -751,7 +771,7 @@ def main() -> int:
             raise ValueError("Comparison manifest uses a different length definition")
         comparison_ids = [row["sample_id"] for row in comparison_manifest["samples"]]
         selection_seed = int(comparison_manifest["seed"])
-    report = {"schema_version": 2, "provenance": provenance,
+    report = {"schema_version": 2, "provenance": provenance, **classification,
         "evaluation": {"manifest_path": str(manifest_path.resolve()),
                        "manifest_sha256": json_sha256(manifest),
                        "dictionary": manifest['dictionary'],
@@ -761,6 +781,8 @@ def main() -> int:
                       "path": str((PROJECT_ROOT / args.checkpoint).resolve()) if args.checkpoint else None,
                       "sha256": provenance.get('checkpoint_sha256')},
     }
+    if args.candidate_registry:
+        report['candidate']['manifest_path'] = str(args.candidate_registry.resolve())
     output_dir.mkdir(parents=True, exist_ok=True)
     tf_records = []
     if device.type == "cuda":
@@ -868,7 +890,23 @@ def main() -> int:
     if examples:
         from metrics.sketchformer.visualisation import save_reconstruction_examples
 
-        save_reconstruction_examples(examples, output_dir / f"{run_name}_plots")
+        captions = None
+        if args.image_captions:
+            captions = {'checkpoint': (provenance.get('checkpoint_sha256') or 'random')[:12],
+                        'kind': classification['report_kind'], 'reasons': classification['not_quality_reasons'],
+                        'seed': seed, 'generation_limit': args.max_generation_length, 'decoding': 'greedy', 'cache': True}
+        image_paths = save_reconstruction_examples(examples, output_dir / f"{run_name}_plots", caption_metadata=captions)
+    else:
+        image_paths = []
+    if 'free_running' in report:
+        index_path = output_dir / f'{run_name}_plots' / 'images_index.json'
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        index_path.write_text(json.dumps({'schema_version': 1, 'images': [
+            {'path': str(path.relative_to(output_dir)), 'sample_id': row['sample_id'],
+             'checkpoint_sha256': report['candidate']['sha256'], 'settings': settings}
+            for path, row in zip(image_paths, report['evaluation']['comparison_samples'])
+        ]}, indent=2))
+        report['free_running']['images_index_path'] = str(index_path.relative_to(output_dir))
     report_path.write_text(
         json.dumps(report, indent=2, allow_nan=False), encoding="utf-8"
     )

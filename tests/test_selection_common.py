@@ -1,4 +1,5 @@
 import copy
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -68,3 +69,31 @@ class ReportValidationTest(unittest.TestCase):
         a = select_comparison_samples(rows, 4, 42)
         self.assertEqual(a, select_comparison_samples(rows[::-1], 4, 42))
         self.assertEqual({r['length_bucket'] for r in a}, {'short', 'extended'})
+
+    def test_invalid_scores_and_changed_full_token_evidence(self):
+        path = self.root / 'a_per_sample.jsonl'
+        original = read_jsonl(path)[0]
+        for value in (-.1, 1.1, float('nan'), float('inf')):
+            row = copy.deepcopy(original)
+            row['drawing_score'] = value
+            path.write_text(json.dumps(row))
+            with self.assertRaisesRegex(ValueError, 'drawing_score'):
+                self.validate()
+        row = copy.deepcopy(original)
+        row['validation_tokens'].append(2)
+        path.write_text(json.dumps(row))
+        with self.assertRaises(ValueError): self.validate()
+
+    def test_candidate_identity_and_fingerprint_changes(self):
+        report = read_json(self.path)
+        for field, value in [('inference_fingerprint', 'changed'), ('dictionary', {})]:
+            altered = copy.deepcopy(report)
+            altered['evaluation'][field] = value
+            write(self.path, altered)
+            with self.assertRaises(ValueError): self.validate()
+        write(self.path, report)
+        path = self.root / 'a_per_sample.jsonl'
+        row = read_jsonl(path)[0]
+        row['candidate_id'] = 'another'
+        path.write_text(json.dumps(row))
+        with self.assertRaisesRegex(ValueError, 'record candidate'): self.validate()
