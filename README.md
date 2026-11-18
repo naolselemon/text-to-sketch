@@ -563,6 +563,11 @@ pytest -q
 On a CPU-only development machine, use `--dry-run` and the smoke experiment to
 validate config composition without launching full training.
 
+For complete free-running checkpoint evaluation, deterministic selection and
+separate held-out testing, follow the [maintainer hand-off](evals/free_running_handoff.md).
+CPU fixture scores verify mechanics only; the maintainer performs real generation,
+image review and model acceptance.
+
 ## Known Gaps
 
 - TensorFlow must be installed in the conversion environment to read original

@@ -118,6 +118,36 @@ class CandidateEvaluationCLITest(unittest.TestCase):
     def outcomes(self, attempt):
         return read_json(self.out / f'evaluation_attempt_{attempt:04d}.json')['outcomes']
 
+    def test_fixture_evaluation_cannot_select_or_materialize_a_model(self):
+        # Actual tiny-model generation exercises the wrapper, never model quality.
+        self.run_evaluate(self.fixture_candidates(), '--training-origin', 'real_training')
+        manifest = read_json(self.out / 'evaluation_manifest.json')
+        self.assertEqual(len(manifest['samples']), len(self.sequences))
+        outcomes = self.outcomes(1)
+        self.assertEqual([row['status'] for row in outcomes], ['complete', 'complete'])
+        reports = [Path(row['report_path']) for row in outcomes]
+        before = [path.read_bytes() for path in reports]
+        for path in reports:
+            report, _ = validate_report(path, manifest, self.root / 'codebook.npy')
+            self.assertEqual(report['report_kind'], 'not_quality')
+            self.assertEqual(report['not_quality_reasons'], ['smoke_test'])
+            self.assertTrue(report['origin_override_ignored'])
+        selection_path = self.root / 'fixture-selection.json'
+        result = subprocess.run([sys.executable, '-B', 'evals/select_checkpoint.py', 'select',
+            '--evaluation-manifest', str(self.out / 'evaluation_manifest.json'),
+            '--reports-dir', str(self.out), '--codebook-path', str(self.root / 'codebook.npy'),
+            '--output', str(selection_path), '--materialize'],
+            cwd=ROOT, text=True, capture_output=True, timeout=90)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        selection = read_json(selection_path)
+        self.assertIsNone(selection['winner'])
+        self.assertEqual(selection['ranking'], [])
+        self.assertEqual(len(selection['rejected_candidates']), 2)
+        self.assertTrue(all('Non-quality report: smoke_test' in row['reasons']
+                            for row in selection['rejected_candidates']))
+        self.assertFalse((self.root / 'selected').exists())
+        self.assertEqual([path.read_bytes() for path in reports], before)
+
     def test_consistent_population_skip_and_retry_preserve_previous_attempt(self):
         candidates = self.fixture_candidates()
         self.run_evaluate(candidates, '--eval-samples', '2', '--training-origin', 'real_training')

@@ -237,6 +237,10 @@ acceptance remain the maintainer's hand-off.
 
 # Free-running checkpoint selection
 
+For the ordered CPU verification, real-checkpoint commands, image review and
+acceptance steps, see the [maintainer hand-off](free_running_handoff.md). CPU
+fixture results are never evidence of model quality.
+
 Root `best.pt` is a stage-dependent validation-loss diagnostic: its tracker resets
 at curriculum stage boundaries. `selected/model.*` is the checkpoint selected by
 complete free-running drawings and their quality. Next-token loss remains a

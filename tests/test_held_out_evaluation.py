@@ -245,6 +245,76 @@ class HeldOutPopulationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Held-out reports'):
             eligible_report(result['report_path'], self.frozen_validation, self.book)
 
+    def test_synthetic_cli_handoff_ranking_materialization_and_test_isolation(self):
+        # Handwritten token/report evidence exercises mechanics, not a trained model.
+        self.prepare_selection()
+        self.selection_path.unlink()
+        for name, prediction in [('b', None), ('c', [6, 1, 2, 5])]:
+            path, _, _, _ = synthetic_report(self.validation_dir, name, step=0, prediction=prediction)
+            report = read_json(path)
+            report['provenance']['experiment'] = 'custom-synthetic-experiment'
+            report['evaluation'].update(inference_settings=self.frozen_validation['inference_settings'],
+                inference_fingerprint=self.frozen_validation['inference_fingerprint'],
+                manifest_sha256=json_sha256(self.frozen_validation))
+            write(path, report)
+            index_path = self.validation_dir / f'{name}_images_index.json'
+            index = read_json(index_path)
+            index['images'][0]['settings'] = self.frozen_validation['inference_settings']
+            write(index_path, index)
+        write(self.validation_dir / 'evaluation_manifest.json', self.frozen_validation)
+        incomplete = json.loads((self.validation_dir / 'c_per_sample.jsonl').read_text())
+        self.assertEqual(incomplete['geometry_f1_2px'], 1.)
+        self.assertFalse(incomplete['complete'])
+        self.assertEqual(incomplete['drawing_score'], 0.)
+        result = subprocess.run([sys.executable, '-B', 'evals/select_checkpoint.py', 'select',
+            '--evaluation-manifest', str(self.validation_dir / 'evaluation_manifest.json'),
+            '--reports-dir', str(self.validation_dir), '--codebook-path', str(self.book),
+            '--output', str(self.selection_path), '--materialize'],
+            cwd=ROOT, capture_output=True, text=True, timeout=90)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        selection = read_json(self.selection_path)
+        self.assertEqual([row['candidate_id'] for row in selection['ranking']], ['b', 'a', 'c'])
+        self.assertEqual(selection['winner']['candidate_id'], 'b')
+        self.assertTrue(selection['tie_resolution_trace'])
+        materialized = Path(selection['selected_checkpoint'])
+        self.assertEqual(materialized.name, 'model.pt')
+        self.assertEqual(file_sha256(materialized), selection['winner']['sha256'])
+        self.assertEqual(materialized.read_bytes(), (self.validation_dir / 'b.pt').read_bytes())
+        before = self.selection_path.read_bytes()
+        command = ['select_checkpoint.py', 'test', '--selection', str(self.selection_path),
+            '--data-root', str(self.data), '--codebook-path', str(self.book), '--device', 'cpu',
+            '--num-plots', '2', '--output-dir', str(self.out)]
+        # Candidate report generation is substituted; the CLI, artifact verification,
+        # frozen test population and report validation execute through production code.
+        with patch('evals.held_out_evaluation.evaluate_candidate', side_effect=self.synthetic_test_report) as generate:
+            with patch.object(sys, 'argv', command), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(), 0)
+        generate.assert_called_once()
+        self.assertEqual(generate.call_args.args[0]['candidate_id'], 'b')
+        self.assertEqual(generate.call_args.args[0]['path'], str(materialized))
+        test_manifest = read_json(self.out / 'evaluation_manifest.json')
+        self.assertEqual(len(test_manifest['samples']), len(self.sequences))
+        self.assertTrue({row['sample_id'] for row in test_manifest['samples']}.isdisjoint(
+            row['sample_id'] for row in self.frozen_validation['samples']))
+        attempt = read_json(self.out / 'held_out_evaluation_attempt_0001.json')
+        report, records = validate_report(attempt['report_path'], test_manifest, self.book)
+        self.assertEqual(len(records), len(self.sequences))
+        self.assertEqual(report['held_out']['selection_sha256'], file_sha256(self.selection_path))
+        self.assertFalse(report['selection_eligible'])
+        self.assertIsNone(report['selection_score'])
+        # A held-out report cannot select a new winner even if its drawings are perfect.
+        reselect_path = self.root / 'test-reselection.json'
+        result = subprocess.run([sys.executable, '-B', 'evals/select_checkpoint.py', 'select',
+            '--evaluation-manifest', str(self.validation_dir / 'evaluation_manifest.json'),
+            '--reports-dir', str(self.out), '--codebook-path', str(self.book),
+            '--output', str(reselect_path)], cwd=ROOT, capture_output=True, text=True, timeout=90)
+        self.assertNotEqual(result.returncode, 0)
+        rejected = read_json(reselect_path)
+        self.assertIsNone(rejected['winner'])
+        self.assertIn('Held-out reports are ineligible', rejected['rejected_candidates'][0]['reasons'][0])
+        self.assertEqual(self.selection_path.read_bytes(), before)
+        self.assertEqual(file_sha256(materialized), selection['winner']['sha256'])
+
     def test_overlap_and_settings_mismatch_fail_before_generation(self):
         self.prepare_selection()
         with patch('evals.held_out_evaluation.evaluate_candidate') as generate:
