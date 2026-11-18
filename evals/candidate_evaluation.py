@@ -1,6 +1,7 @@
 """Sequential candidate evaluation with frozen settings and preserved attempts."""
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -98,12 +99,13 @@ def freeze_candidate_snapshot(path, candidates, failures):
                  'candidate snapshot; use a fresh output directory')
 
 
-def prepare_frozen_evaluation(args):
+def prepare_frozen_evaluation(args, *, split='valid', config=None, validation_manifest=None):
     from evals.benchmark_eval import _prepare_loader
     from scripts.sketchformer.config import compose_training_config, resolve_device
     from scripts.sketchformer.train import _resolve_precision_runtime
     from evals.benchmark_common import LENGTH_DEFINITION, select_comparison_samples
-    config = compose_training_config(args.config, experiment=args.experiment)
+    config = (compose_training_config(args.config, experiment=args.experiment)
+              if config is None else copy.deepcopy(config))
     # This is already composed. Do not reapply stage/training overrides in the child.
     config.get('experiment', {}).pop('overrides', None)
     config['data']['dataset']['root'] = str(Path(args.data_root).resolve())
@@ -122,10 +124,18 @@ def prepare_frozen_evaluation(args):
         config['trainer']['runtime']['precision'] = args.precision
     precision = _resolve_precision_runtime(config, resolve_device(args.device))
     config['trainer']['runtime']['precision'] = precision.effective
-    loader = _prepare_loader(config, 'valid', args.seed)
+    loader = _prepare_loader(config, split, args.seed)
     settings = inference_settings(config, precision.effective, args.max_generation_length)
-    proposed = build_evaluation_manifest(loader.dataset, 'valid',
+    if validation_manifest is not None:
+        require_same(settings, validation_manifest['inference_settings'], 'held-out inference settings')
+    proposed = build_evaluation_manifest(loader.dataset, split,
         dictionary_identity(args.codebook_path, dictionary_layout(config)), settings, args.seed, args.eval_samples)
+    if validation_manifest is not None:
+        require_same(proposed['dictionary'], validation_manifest['dictionary'], 'held-out dictionary')
+        validation_ids = {row['sample_id'] for row in validation_manifest['samples']}
+        overlap = validation_ids & {row['sample_id'] for row in proposed['samples']}
+        if overlap:
+            raise ValueError('Test sample IDs overlap selection validation IDs: ' + ', '.join(sorted(overlap)))
     output = Path(args.output_dir).resolve()
     output.mkdir(parents=True, exist_ok=True)
     manifest_path = output / 'evaluation_manifest.json'
@@ -151,7 +161,7 @@ def prepare_frozen_evaluation(args):
     return manifest_path, manifest, comparison_path, resolved_path
 
 
-def evaluate_candidate(candidate, args, manifest_path, manifest, comparison_path, config_path):
+def evaluate_candidate(candidate, args, manifest_path, manifest, comparison_path, config_path, *, held_out=None):
     output = Path(args.output_dir).resolve()
     name = re.sub(r'[^a-zA-Z0-9._-]+', '-', candidate['candidate_id']).strip('.-')[:100] or 'candidate'
     directory = output / (name + '-' + hashlib.sha256(candidate['candidate_id'].encode()).hexdigest()[:8])
@@ -168,6 +178,11 @@ def evaluate_candidate(candidate, args, manifest_path, manifest, comparison_path
                 require_same(report[key], value, 'report classification')
             require_same(report['evaluation']['comparison_samples'], comparison, 'frozen comparison population')
             require_same(report['provenance']['checkpoint_load']['strict'], True, 'strict checkpoint loading')
+            if held_out is not None:
+                require_same(report.get('evaluation_role'), 'held_out', 'held-out report role')
+                require_same(report.get('held_out'), held_out, 'held-out selection reference')
+                require_same(report.get('selection_eligible'), False, 'held-out selection eligibility')
+                require_same(report.get('selection_score'), None, 'held-out selection score')
             return report_path, True
         except (ValueError, OSError, KeyError, TypeError):
             pass
@@ -182,7 +197,7 @@ def evaluate_candidate(candidate, args, manifest_path, manifest, comparison_path
     command = [sys.executable, '-B', str(Path(__file__).with_name('benchmark_eval.py')),
         '--config', str(config_path), '--experiment', args.experiment,
         '--checkpoint', candidate['path'], '--candidate-id', candidate['candidate_id'],
-        '--global-step', str(candidate['global_step']), '--split', 'valid',
+        '--global-step', str(candidate['global_step']), '--split', manifest['split'],
         '--data-root', str(Path(args.data_root).resolve()), '--codebook-path', str(Path(args.codebook_path).resolve()),
         '--device', args.device, '--precision', manifest['inference_settings']['effective_precision'],
         '--max-generation-length', str(args.max_generation_length), '--seed', str(args.seed),
@@ -208,6 +223,9 @@ def evaluate_candidate(candidate, args, manifest_path, manifest, comparison_path
     index = read_json(attempt_dir / report['free_running']['images_index_path'])
     atomic_json(attempt_dir / 'images_index.json', index)
     report['free_running']['images_index_path'] = 'images_index.json'
+    if held_out is not None:
+        report.update(evaluation_role='held_out', held_out=held_out,
+                      selection_eligible=False, selection_score=None)
     report_path.write_text(json.dumps(report, indent=2, allow_nan=False))
     validate_report(report_path, manifest, args.codebook_path, candidate)
     require_same(report['evaluation']['comparison_samples'], comparison, 'frozen comparison population')

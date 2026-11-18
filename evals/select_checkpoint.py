@@ -86,6 +86,8 @@ def artifact_hashes(report_path, report):
 
 def eligible_report(path, manifest, codebook):
     report = read_json(path)
+    if report.get('evaluation_role') == 'held_out' or report.get('selection_eligible') is False:
+        raise ValueError('Held-out reports are ineligible for selection')
     if manifest['split'] != 'valid' or report['provenance']['split'] != 'valid':
         raise ValueError('Selection requires split valid; test reports are ineligible')
     if report.get('report_kind') != 'quality' or report.get('not_quality_reasons'):
@@ -213,6 +215,17 @@ def parser():
     evaluate.add_argument('--training-origin', choices=['real_training'])
     evaluate.add_argument('--smoke-test', action='store_true')
     evaluate.add_argument('--output-dir', type=Path, required=True)
+    held_out = commands.add_parser('test', help='Evaluate only the selected winner on disjoint held-out test drawings')
+    held_out.add_argument('--selection', type=Path, required=True)
+    held_out.add_argument('--checkpoint', type=Path)
+    held_out.add_argument('--data-root', type=Path, required=True)
+    held_out.add_argument('--codebook-path', type=Path, required=True)
+    held_out.add_argument('--device', default='auto')
+    held_out.add_argument('--precision', default=None)
+    held_out.add_argument('--max-generation-length', type=int, default=None)
+    held_out.add_argument('--config', default=None)
+    held_out.add_argument('--num-plots', type=int, default=50)
+    held_out.add_argument('--output-dir', type=Path, required=True)
     return result
 
 
@@ -222,8 +235,11 @@ def main():
         if args.command == 'evaluate':
             from evals.candidate_evaluation import evaluate
             return evaluate(args)
+        if args.command == 'test':
+            from evals.held_out_evaluation import evaluate_test
+            return evaluate_test(args)
         return select(args)
-    except (ValueError, OSError, KeyError, TypeError) as exc:
+    except (ValueError, OSError, KeyError, TypeError, RuntimeError) as exc:
         print(f'[selection] {exc}', file=sys.stderr)
         return 2
 

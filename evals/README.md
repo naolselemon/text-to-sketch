@@ -356,3 +356,51 @@ CPU orchestration tests use tiny checkpoints with fixture metadata. Those report
 remain non-quality and their scores are not model-quality evidence. Real generation,
 candidate image inspection, ranking review and model acceptance belong to the
 maintainer. Generated weights, data and reports stay out of commits.
+
+# Held-out evaluation of the selected checkpoint
+
+Evaluate the saved winner on the complete `test` split after validation selection:
+
+```bash
+.venv/bin/python -B evals/select_checkpoint.py test \
+  --selection runs/free-running-selection/selection.json \
+  --data-root data/processed/sketchformer-ready-data/tok-dict-4096 \
+  --codebook-path data/processed/sketch_token/codebook.npy \
+  --device cuda \
+  --output-dir runs/free-running-selection/test
+```
+
+Before generation, the command checks supported selection/completeness/scoring
+versions, the validation manifest, every ranked report and artifact hash, checkpoint
+hashes, candidate eligibility, and the saved ranking and tie-resolution trace.
+It uses `selected_checkpoint` from `selection.json` when materialized, otherwise
+the winner's recorded checkpoint path. An optional `--checkpoint` must have exactly
+the winner's hash; it cannot bypass verification of the original or materialized
+checkpoint. The dictionary must match selection.
+
+Test inference replays the frozen architecture, token processing, greedy/cache
+settings, precision and generation limit. Device is informational, but its effective
+precision must still match. Optional `--config`, `--precision` and
+`--max-generation-length` overrides must reproduce the frozen inference specification.
+The seed comes from validation. `--num-plots` defaults to 50. There is no test subset
+or partial-batch option: every sample in the requested test split is evaluated.
+
+A separate `evaluation_manifest.json` freezes test targets and split-file hashes.
+The test dataset hash may differ from validation; test sample IDs must be disjoint
+from all IDs used for selection. Overlap or inference mismatches fail before
+generation. Only the saved winner is evaluated, with strict loading and saved token
+evidence. Reports must validate against the entire test population.
+
+The test output records the `selection.json` SHA256 in `selection_reference.json`,
+the report's `held_out` metadata, and `held_out_evaluation_attempt_XXXX.json`.
+Reports have `evaluation_role: held_out`, `selection_eligible: false`, and
+`selection_score: null`; drawing metrics remain held-out diagnostics. Test reports
+cannot enter checkpoint selection and never change `selection.json`. Complete
+matching attempts can be skipped; interrupted or changed artifacts are preserved
+and retried under fresh attempt names. Changed selection references require a fresh
+output directory.
+
+CPU tests exercise this workflow with temporary synthetic report evidence and
+non-quality tiny-model generation. They establish mechanics and test isolation,
+not model quality. Real-checkpoint generation, image review and acceptance remain
+the maintainer's responsibility.
