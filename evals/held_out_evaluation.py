@@ -9,7 +9,7 @@ from evals.candidate_evaluation import (
 )
 from evals.selection_common import (
     SELECTION_RULE_VERSION, atomic_json, file_sha256, json_sha256, read_json,
-    require_same, validate_manifest, validate_report,
+    require_same, validate_comparison_manifest, validate_manifest, validate_report,
 )
 
 
@@ -32,6 +32,14 @@ def verify_selection(selection_path, codebook_path, checkpoint_override=None):
                 'completeness_rule_version', 'scoring_rule_version'):
         require_same(selection[key], manifest[key], 'selection ' + key)
     require_same(file_sha256(codebook_path), manifest['dictionary']['sha256'], 'dictionary file')
+    if not all(key in selection for key in (
+            'comparison_manifest_path', 'comparison_manifest_sha256', 'comparison_identity')):
+        raise ValueError('Selection lacks a frozen comparison manifest; rerun selection')
+    comparison_path = Path(selection['comparison_manifest_path'])
+    require_same(file_sha256(comparison_path), selection['comparison_manifest_sha256'], 'frozen comparison manifest hash')
+    comparison = read_json(comparison_path)
+    validate_comparison_manifest(comparison, manifest, require_images=True)
+    require_same(json_sha256(comparison), selection['comparison_identity'], 'frozen comparison identity')
     if not selection['ranking'] or selection['winner'] is None:
         raise ValueError('Selection has no eligible winner')
     require_same(selection['winner'], selection['ranking'][0], 'selection winner')
@@ -42,7 +50,7 @@ def verify_selection(selection_path, codebook_path, checkpoint_override=None):
         for artifact, expected_hash in candidate['artifacts'].items():
             require_same(file_sha256(artifact), expected_hash, 'selection artifact hash: ' + artifact)
         # Recomputing also checks that the saved artifact inventory is complete.
-        current = eligible_report(candidate['report_path'], manifest, codebook_path)
+        current = eligible_report(candidate['report_path'], manifest, codebook_path, comparison)
         require_same(candidate, current, 'ranked candidate evidence')
         verified.append(current)
     ranking, trace = rank_candidates(verified, selection['tolerance'])
@@ -53,6 +61,7 @@ def verify_selection(selection_path, codebook_path, checkpoint_override=None):
         require_same(file_sha256(selection['selected_checkpoint']), winner['sha256'], 'materialized checkpoint hash')
     checkpoint = Path(checkpoint_override or selection.get('selected_checkpoint') or winner['path']).resolve()
     require_same(file_sha256(checkpoint), winner['sha256'], 'test checkpoint hash')
+    require_same(file_sha256(comparison_path), selection['comparison_manifest_sha256'], 'frozen comparison manifest hash')
     require_same(file_sha256(selection_path), digest, 'selection changed during verification')
     return selection, manifest, checkpoint, digest
 
@@ -108,7 +117,8 @@ def evaluate_test(args):
     freeze_candidate_snapshot(output / 'candidates.json', [candidate], [])
     path, skipped = evaluate_candidate(candidate, args, manifest_path, manifest, comparison_path,
                                        config_path, held_out=reference)
-    test_report, _ = validate_report(path, manifest, args.codebook_path, candidate)
+    test_report, _ = validate_report(path, manifest, args.codebook_path, candidate,
+                                     comparison_manifest=read_json(comparison_path))
     require_same(test_report.get('evaluation_role'), 'held_out', 'held-out report role')
     require_same(test_report.get('held_out'), reference, 'held-out selection reference')
     require_same(test_report.get('selection_eligible'), False, 'held-out selection eligibility')

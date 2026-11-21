@@ -169,14 +169,14 @@ def evaluate_candidate(candidate, args, manifest_path, manifest, comparison_path
     effective_experiment = read_json(config_path).get('experiment', {}).get('name', args.experiment)
     classification = classify_report(checkpoint_metadata(candidate['path']), experiment=effective_experiment,
                                     smoke_test=args.smoke_test, training_origin_override=args.training_origin)
-    comparison = read_json(comparison_path)['samples']
+    comparison = read_json(comparison_path)
     # Verify provenance labels and origin overrides too before skipping.
     for report_path in sorted(directory.rglob('*_report.json')):
         try:
-            report, _ = validate_report(report_path, manifest, args.codebook_path, candidate)
+            report, _ = validate_report(report_path, manifest, args.codebook_path, candidate,
+                                        comparison_manifest=comparison)
             for key, value in classification.items():
                 require_same(report[key], value, 'report classification')
-            require_same(report['evaluation']['comparison_samples'], comparison, 'frozen comparison population')
             require_same(report['provenance']['checkpoint_load']['strict'], True, 'strict checkpoint loading')
             if held_out is not None:
                 require_same(report.get('evaluation_role'), 'held_out', 'held-out report role')
@@ -227,8 +227,7 @@ def evaluate_candidate(candidate, args, manifest_path, manifest, comparison_path
         report.update(evaluation_role='held_out', held_out=held_out,
                       selection_eligible=False, selection_score=None)
     report_path.write_text(json.dumps(report, indent=2, allow_nan=False))
-    validate_report(report_path, manifest, args.codebook_path, candidate)
-    require_same(report['evaluation']['comparison_samples'], comparison, 'frozen comparison population')
+    validate_report(report_path, manifest, args.codebook_path, candidate, comparison_manifest=comparison)
     for key, value in classification.items():
         require_same(report[key], value, 'report classification')
     return report_path, False

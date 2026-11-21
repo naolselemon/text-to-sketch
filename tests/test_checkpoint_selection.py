@@ -114,6 +114,7 @@ class SelectionCLITest(unittest.TestCase):
         self.assertEqual(Path(selection['selected_checkpoint']).name, 'model.pt')
         self.assertEqual(selection['evaluation_manifest_sha256'], file_sha256(self.root / 'evaluation_manifest.json'))
         self.assertEqual(selection['evaluation_identity'], json_sha256(self.manifest))
+        self.assertEqual(selection['comparison_manifest_sha256'], file_sha256(self.root / 'comparison_manifest.json'))
         self.assertEqual(selection['winner']['report_sha256'], file_sha256(self.path))
         for path, digest in selection['winner']['artifacts'].items():
             self.assertEqual(file_sha256(path), digest)
@@ -122,6 +123,48 @@ class SelectionCLITest(unittest.TestCase):
         self.assertEqual((self.root / 'selection.json').read_bytes(), before)
         result = self.run_select('--materialize', output='another.json')
         self.assertNotEqual(result.returncode, 0)
+
+    def test_cleared_image_evidence_cannot_select_or_materialize(self):
+        frozen_path = self.root / 'comparison_manifest.json'
+        frozen = frozen_path.read_bytes()
+        report = read_json(self.path)
+        report['evaluation']['comparison_samples'] = []
+        write(self.path, report)
+        write(self.root / report['free_running']['comparison_manifest_path'], {'samples': []})
+        write(self.root / report['free_running']['images_index_path'], {'images': []})
+        (self.root / 'a.png').unlink()
+        self.assertEqual(self.select_here(materialize=True), 2)
+        selection = read_json(self.root / 'selection.json')
+        self.assertIsNone(selection['winner'])
+        self.assertIn('frozen comparison population', selection['rejected_candidates'][0]['reasons'][0])
+        self.assertFalse((self.root / 'selected').exists())
+        self.assertEqual(frozen_path.read_bytes(), frozen)
+
+    def test_shared_comparison_manifest_is_required_and_cannot_be_empty(self):
+        path = self.root / 'comparison_manifest.json'
+        comparison = read_json(path)
+        path.unlink()
+        with self.assertRaisesRegex(ValueError, 'Missing frozen comparison manifest'):
+            self.select_here(materialize=True)
+        write(path, dict(comparison, samples=[]))
+        with self.assertRaisesRegex(ValueError, 'nonempty frozen comparison population'):
+            self.select_here(materialize=True)
+        self.assertFalse((self.root / 'selection.json').exists())
+        self.assertFalse((self.root / 'selected').exists())
+
+    def test_candidate_requires_independent_comparison_manifest(self):
+        with self.assertRaisesRegex(ValueError, 'independent frozen comparison manifest'):
+            eligible_report(self.path, self.manifest, self.book)
+
+    def test_explicit_comparison_manifest_cli_and_recorded_identity(self):
+        path = self.root / 'shared-images.json'
+        (self.root / 'comparison_manifest.json').rename(path)
+        result = self.run_select('--comparison-manifest', str(path))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        selection = read_json(self.root / 'selection.json')
+        self.assertEqual(selection['comparison_manifest_path'], str(path))
+        self.assertEqual(selection['comparison_manifest_sha256'], file_sha256(path))
+        self.assertEqual(selection['comparison_identity'], json_sha256(read_json(path)))
 
     def test_nonquality_and_invalid_steps_no_loss_fallback(self):
         report = read_json(self.path)
@@ -242,7 +285,8 @@ class SelectionCLITest(unittest.TestCase):
         report['free_running']['per_bucket'] = {r['length_bucket']: _fr_summary([r]) for r in records}
         write(self.path, report)
         (self.root / 'a_per_sample.jsonl').write_text(''.join(json.dumps(r) + '\n' for r in records))
-        eligible = eligible_report(self.path, self.manifest, self.book)
+        eligible = eligible_report(self.path, self.manifest, self.book,
+                                   read_json(self.root / 'comparison_manifest.json'))
         self.assertEqual(eligible['mean_drawing_score'], .5)
         self.assertEqual(eligible['completion_rate'], .5)
         self.assertEqual(eligible['minimum_bucket_mean_drawing_score'], 0.)

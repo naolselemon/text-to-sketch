@@ -14,7 +14,7 @@ sys.path.insert(0, str(ROOT))
 
 from evals.selection_common import (
     SELECTION_RULE_VERSION, atomic_json, file_sha256, json_sha256, read_json,
-    require_same, validate_manifest, validate_report,
+    require_same, validate_comparison_manifest, validate_manifest, validate_report,
 )
 
 FLOAT_CRITERIA = ('mean_drawing_score', 'completion_rate', 'minimum_bucket_mean_drawing_score')
@@ -84,7 +84,7 @@ def artifact_hashes(report_path, report):
     return {str(p.resolve()): file_sha256(p) for p in paths}
 
 
-def eligible_report(path, manifest, codebook):
+def eligible_report(path, manifest, codebook, comparison_manifest=None):
     report = read_json(path)
     if report.get('evaluation_role') == 'held_out' or report.get('selection_eligible') is False:
         raise ValueError('Held-out reports are ineligible for selection')
@@ -93,7 +93,10 @@ def eligible_report(path, manifest, codebook):
     if report.get('report_kind') != 'quality' or report.get('not_quality_reasons'):
         raise ValueError('Non-quality report: ' + ', '.join(report.get('not_quality_reasons', [])))
     validate_candidate_identity(report['candidate'])
-    report, records = validate_report(path, manifest, codebook)
+    if comparison_manifest is None:
+        raise ValueError('Selection requires an independent frozen comparison manifest')
+    validate_comparison_manifest(comparison_manifest, manifest, require_images=True)
+    report, records = validate_report(path, manifest, codebook, comparison_manifest=comparison_manifest)
     identity = report['candidate']
     values = [r['drawing_score'] for r in records]
     bucket_means = {b: math.fsum(r['drawing_score'] for r in records if r['length_bucket'] == b) /
@@ -151,10 +154,18 @@ def select(args):
         raise FileExistsError('Selection output already exists')
     if not Path(args.reports_dir).is_dir():
         raise ValueError('Reports directory does not exist')
+    comparison_path = Path(getattr(args, 'comparison_manifest', None) or
+                           manifest_path.parent / 'comparison_manifest.json').resolve()
+    if not comparison_path.is_file():
+        raise ValueError('Missing frozen comparison manifest; pass --comparison-manifest or keep '
+                         'comparison_manifest.json beside the evaluation manifest')
+    comparison_hash = file_sha256(comparison_path)
+    comparison = read_json(comparison_path)
+    validate_comparison_manifest(comparison, manifest, require_images=True)
     eligible, rejected = [], []
     for path in sorted(Path(args.reports_dir).rglob('*_report.json')):
         try:
-            eligible.append(eligible_report(path, manifest, args.codebook_path))
+            eligible.append(eligible_report(path, manifest, args.codebook_path, comparison))
         except Exception as exc:
             # A corrupt candidate artifact must not prevent other candidates being checked.
             rejected.append({'report_path': str(path.resolve()), 'reasons': [str(exc)]})
@@ -174,10 +185,13 @@ def select(args):
                      evaluation_manifest_path=str(manifest_path),
                      evaluation_manifest_sha256=file_sha256(manifest_path),
                      evaluation_identity=json_sha256(manifest), dictionary=manifest['dictionary'],
+                     comparison_manifest_path=str(comparison_path),
+                     comparison_manifest_sha256=comparison_hash, comparison_identity=json_sha256(comparison),
                      inference_settings=manifest['inference_settings'], inference_fingerprint=manifest['inference_fingerprint'],
                      completeness_rule_version=manifest['completeness_rule_version'], scoring_rule_version=manifest['scoring_rule_version'],
                      ranking=ranking, tie_resolution_trace=trace,
                      rejected_candidates=sorted(rejected, key=lambda r: r['report_path']), winner=winner)
+    require_same(file_sha256(comparison_path), comparison_hash, 'frozen comparison manifest changed during selection')
     if winner and args.materialize:
         selection['selected_checkpoint'] = materialize(winner, args.output)
     atomic_json(args.output, selection)
@@ -193,6 +207,8 @@ def parser():
     commands = result.add_subparsers(dest='command', required=True)
     pick = commands.add_parser('select')
     pick.add_argument('--evaluation-manifest', type=Path, required=True)
+    pick.add_argument('--comparison-manifest', type=Path,
+                      help='Shared frozen image manifest (defaults to comparison_manifest.json beside the evaluation manifest)')
     pick.add_argument('--reports-dir', type=Path, required=True)
     pick.add_argument('--codebook-path', type=Path, required=True)
     pick.add_argument('--output', type=Path, required=True)

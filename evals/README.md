@@ -273,6 +273,13 @@ full ranking and tie-resolution trace regardless of candidate input order.
 Selection checks each report against the supplied frozen `valid` manifest, matching
 dictionary, inference settings, completeness/scoring versions, target identities,
 saved token evidence, aggregates, image artifacts and actual checkpoint hashes.
+It also requires the independently frozen shared `comparison_manifest.json` beside
+the evaluation manifest, or an explicit `--comparison-manifest PATH` for standalone
+benchmarks. Its seed, dataset hash and target identities must match validation.
+Every candidate must contain exactly its ordered comparison samples and image-index
+IDs; clearing or substituting a candidate's own image lists cannot make it eligible.
+The shared comparison population must be nonempty: `--num-plots 0` runs remain
+diagnostics and cannot select a checkpoint.
 Candidates require IDs and recorded nonnegative integer global steps. Non-quality
 and test reports are always ineligible, as are partial evaluation reports. Duplicate
 candidate IDs invalidate every conflicting report. Rejections are recorded; when no
@@ -291,8 +298,13 @@ Once candidate benchmarks and a shared validation manifest have been produced:
 ```
 
 `selection.json` records the rule, tolerance, frozen identities, full ranking,
-tie-resolution trace, rejected reports, artifact hashes and winner. `--materialize`
-atomically publishes a verified byte-for-byte copy as `selected/model.pt` or
+tie-resolution trace, rejected reports, artifact hashes and winner.
+The shared comparison manifest path, file hash and canonical identity are recorded
+too, and held-out verification checks them before generation. Older selection
+artifacts without this reference must be regenerated with `select`; existing
+candidate reports can be reused with their original shared comparison manifest.
+
+`--materialize` atomically publishes a verified byte-for-byte copy as `selected/model.pt` or
 `selected/model.safetensors`, preserving its actual checkpoint format. Existing
 selection outputs or materialization directories are refused.
 

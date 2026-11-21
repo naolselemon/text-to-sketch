@@ -1,8 +1,10 @@
 """Temporary synthetic reports for selection mechanics, never model evidence."""
+import hashlib
 import json
 from pathlib import Path
 import numpy as np
 import torch
+from evals.benchmark_common import LENGTH_DEFINITION
 from evals.benchmark_eval import _fr_summary
 from evals.selection_common import (
     dictionary_identity, json_sha256, token_sha256, file_sha256,
@@ -43,6 +45,10 @@ def synthetic_report(root, name='a', step=1, prediction=None, split='valid'):
                   eos_rate=float(7 in prediction), max_length_hit=float(7 not in prediction and len(prediction) >= 8))
     (root / (name + '_per_sample.jsonl')).write_text(json.dumps(record) + '\n')
     comparison = [{k: row[k] for k in ('sample_id', 'length_bucket', 'target_length')}]
+    write(root / 'comparison_manifest.json', dict(schema_version=1, seed=manifest['seed'],
+        length_definition=LENGTH_DEFINITION,
+        dataset_sha256=hashlib.sha256(json.dumps(manifest['split_file_sha256'], sort_keys=True).encode()).hexdigest(),
+        samples=comparison))
     write(root / (name + '_comparison_manifest.json'), dict(samples=comparison))
     image = root / (name + '.png')
     image.write_bytes(b'synthetic image existence fixture')

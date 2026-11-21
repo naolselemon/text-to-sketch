@@ -82,6 +82,27 @@ class SelectionVerificationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'ranked checkpoint hash'):
             self.verify()
 
+    def test_changed_or_missing_frozen_comparison_is_rejected(self):
+        comparison_path = self.root / 'comparison_manifest.json'
+        before = comparison_path.read_bytes()
+        comparison_path.write_bytes(before + b'changed')
+        with self.assertRaisesRegex(ValueError, 'frozen comparison manifest hash'):
+            self.verify()
+        comparison_path.unlink()
+        with self.assertRaises(OSError):
+            self.verify()
+        comparison_path.write_bytes(before)
+        self.verify()
+
+    def test_selection_without_frozen_comparison_reference_is_rejected(self):
+        selection = read_json(self.selection_path)
+        for key in ('comparison_manifest_path', 'comparison_manifest_sha256', 'comparison_identity'):
+            changed = dict(selection)
+            del changed[key]
+            write(self.selection_path, changed)
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, 'rerun selection'):
+                self.verify()
+
     def test_unsupported_rules_changed_settings_winner_ranking_and_trace(self):
         original = read_json(self.selection_path)
         changes = [('schema_version', 2), ('rule_version', 'future'),

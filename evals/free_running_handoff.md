@@ -119,6 +119,12 @@ Eligibility requires a validated quality report on the frozen `valid` population
 a matching checkpoint hash and dictionary, a candidate ID, a nonnegative recorded
 global step, and matching inference/completeness/scoring versions. Partial reports,
 non-quality reports and test reports are rejected. There is no loss fallback.
+Selection also loads the shared `validation/comparison_manifest.json` independently
+of candidate reports and requires the exact image sample IDs and order. The default
+location is beside the evaluation manifest; standalone benchmarks can pass their
+original frozen image manifest with `--comparison-manifest PATH`. Missing or empty
+shared comparisons are refused. Removing a candidate's images and clearing its own
+comparison/index entries cannot make it eligible.
 
 The rule ranks higher mean drawing score, higher completion rate, higher minimum
 populated-bucket mean drawing score, earlier global step, then lexicographic
@@ -160,6 +166,9 @@ Do not use test results to choose a different candidate or tune this rule.
 Before generation, test evaluation verifies the selection versions, all ranked
 artifact hashes and eligibility, the dictionary, inference settings and winner
 checkpoint hash. An optional checkpoint override must have that same hash.
+It also verifies the shared comparison manifest hash recorded during selection.
+Older selection artifacts without this reference need a fresh selection; generation
+reports can be reused with their original shared comparison manifest.
 Test uses the frozen validation architecture, precision, generation limit and seed,
 and freezes a separate complete `test` manifest. Split-file hashes may differ;
 test sample IDs must be disjoint from the validation IDs used for selection.

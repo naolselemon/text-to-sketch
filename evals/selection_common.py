@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-from evals.benchmark_common import length_bucket, records_by_id, select_comparison_samples
+from evals.benchmark_common import LENGTH_DEFINITION, length_bucket, records_by_id, select_comparison_samples
 from metrics.sketchformer.drawing import (
     COMPLETENESS_RULE_VERSION, SCORING_RULE_VERSION, score_drawing, validate_drawing,
     validation_tokens,
@@ -175,7 +175,26 @@ def restrict_loader(loader, manifest):
                       collate_fn=loader.collate_fn, num_workers=0)
 
 
-def validate_report(report_path, manifest, codebook_path, candidate=None):
+def validate_comparison_manifest(comparison, manifest, *, require_images=False):
+    """Validate the shared image population independently of candidate reports."""
+    if comparison.get('schema_version') != 1:
+        raise ValueError('Unsupported frozen comparison manifest')
+    require_same(comparison['seed'], manifest['seed'], 'comparison seed')
+    require_same(comparison['length_definition'], LENGTH_DEFINITION, 'comparison length definition')
+    dataset_hash = hashlib.sha256(json.dumps(manifest['split_file_sha256'], sort_keys=True).encode()).hexdigest()
+    require_same(comparison['dataset_sha256'], dataset_hash, 'comparison dataset hash')
+    samples = comparison['samples']
+    if require_images and not samples:
+        raise ValueError('Selection requires a nonempty frozen comparison population')
+    expected = records_by_id(manifest['samples'])
+    if not records_by_id(samples).keys() <= expected.keys():
+        raise ValueError('Unexpected frozen comparison IDs')
+    for row in samples:
+        require_same(row, {key: expected[row['sample_id']][key] for key in (
+            'sample_id', 'length_bucket', 'target_length')}, 'comparison target identity')
+
+
+def validate_report(report_path, manifest, codebook_path, candidate=None, *, comparison_manifest=None):
     """Recompute all selection evidence; raise on any incomplete or changed artifact."""
     from evals.benchmark_eval import _fr_summary
     path = Path(report_path).resolve()
@@ -263,6 +282,9 @@ def validate_report(report_path, manifest, codebook_path, candidate=None):
                for b in sorted({r['length_bucket'] for r in records})}
     require_same(fr['per_bucket'], buckets, 'bucket totals')
     comparison = read_json(path.parent / fr['comparison_manifest_path'])
+    if comparison_manifest is not None:
+        validate_comparison_manifest(comparison_manifest, manifest)
+        require_same(comparison['samples'], comparison_manifest['samples'], 'frozen comparison population')
     if not {r['sample_id'] for r in comparison['samples']} <= expected.keys():
         raise ValueError('Unexpected comparison IDs')
     records_by_id(comparison['samples'])
