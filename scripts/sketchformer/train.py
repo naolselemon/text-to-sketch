@@ -35,6 +35,7 @@ from builders.config_utils import get_nested
 from core import CheckpointCallback, average_logs, move_to_device, set_seed
 from core.metrics import reconstruction_metrics
 from dataloaders import StrokeSequenceDataModule
+from evals.report_evidence import training_origin_from_config
 from scripts.sketchformer.config import (
     batch_limit,
     compose_training_config,
@@ -351,6 +352,9 @@ def main() -> int:
         ),
         mode=str(get_nested(config, "trainer.checkpointing.mode", "min")),
         save_last=bool(get_nested(config, "trainer.checkpointing.save_last", True)),
+        retain_candidates=bool(get_nested(config, 'trainer.checkpointing.retain_candidates', False)),
+        config=config,
+        training_origin=training_origin_from_config(config),
     )
 
     log_every = int(get_nested(config, "trainer.training.log_every_n_steps", 10))
@@ -488,6 +492,8 @@ def main() -> int:
                 epoch=global_epoch,
                 step=global_step,
                 metrics={key: float(value.detach().cpu()) for key, value in val_logs.items()},
+                stage=stage.name,
+                stage_max_length=stage.max_length,
             )
             non_improving = 0 if "best" in saved else non_improving + 1
 

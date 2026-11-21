@@ -21,3 +21,4 @@ docs
 weights/finetuned/
 weights/pretrained/
 study/
+runs/

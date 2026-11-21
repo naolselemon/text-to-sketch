@@ -188,3 +188,235 @@ per-sample quantization/reconstruction correlations, complexity-colored embeddin
 visualizations, and a consolidated interpretation with Week 3 recommendations.
 The exported IDs/embeddings support that work. None of these empirical findings are
 claimed by CPU regression tests, and they must not be inferred from synthetic runs.
+
+# Frozen evaluation identities and evidence labels
+
+Benchmark reports retain `schema_version: 2` and their existing output names.
+`--evaluation-manifest PATH` creates or reuses a frozen evaluation population;
+`--eval-samples N` chooses a deterministic subset across populated length buckets
+and restricts inference to those IDs. Without a subset, the entire requested
+split is evaluated. The evaluation manifest is separate from the smaller
+comparison-image manifest. Stored targets are validated before inference, with
+truncation disabled and internal padding or missing SOS/EOS rejected.
+
+The manifest contains ordered IDs, target lengths and token hashes, split-file
+hashes, dictionary hash and token layout, seed, code revision, and versioned
+completeness/scoring rules. Canonical inference settings are stored alongside
+their fingerprint so mismatches identify the differing fields. Configuration
+hash, device and batch size remain provenance. Standalone benchmarking resolves
+an omitted generation limit to model capacity; direct `run_free_running` callers
+retain their existing batch-derived default.
+
+Use `--save-predictions` to retain `target_tokens`, `predicted_tokens`, and full
+`validation_tokens`, including initial SOS and unexpected post-EOS output.
+Candidate identity, checkpoint hash and global step accompany this evidence.
+`evals.selection_common.validate_report` checks population coverage, target and
+dictionary identity, inference settings, actual checkpoint hashes, recomputed
+drawing scores, aggregates, bucket totals and expected image files. A partial
+`--limit-batches` diagnostic cannot validate against a complete manifest.
+
+Reports are `quality` or `not_quality`. Applicable non-quality reasons have the
+fixed order `random_init`, `smoke_test`, `sanity_preset`, `partial_load`,
+`unknown_training_origin`. `--smoke-test` explicitly labels a diagnostic run;
+fixture metadata, the `smoke_test` preset and `memorize10_long` are also recognized.
+Strict loading alone does not establish training origin. For older checkpoints,
+`--training-origin real_training` fills missing origin only. Embedded metadata
+wins conflicts, recorded through `origin_override_ignored`; known fixture,
+smoke, sanity, random-init and partial-load markers remain non-quality.
+
+`--image-captions` adds checkpoint, report kind/reasons, seed and generation
+settings to the existing sample caption. Numbered image names and comparison
+order are preserved. Each run's plot directory contains `images_index.json`,
+linked from the report, with image paths, sample IDs, checkpoint hash and settings.
+The wrapper naming helper prefixes non-quality runs with `not-quality-`;
+standalone benchmarking continues honoring explicit `--run-name` values.
+
+CPU fixture reports test reproducibility, validation and labeling. Their scores
+are not model-quality evidence. Real-checkpoint generation, image inspection and
+acceptance remain the maintainer's hand-off.
+
+# Free-running checkpoint selection
+
+For the ordered CPU verification, real-checkpoint commands, image review and
+acceptance steps, see the [maintainer hand-off](free_running_handoff.md). CPU
+fixture results are never evidence of model quality.
+
+Root `best.pt` is a stage-dependent validation-loss diagnostic: its tracker resets
+at curriculum stage boundaries. `selected/model.*` is the checkpoint selected by
+complete free-running drawings and their quality. Next-token loss remains a
+training diagnostic. Selection alone does not establish satisfactory model quality.
+
+The versioned rule `free-running-selection-v1` ranks eligible candidates by:
+
+1. Higher mean `drawing_score` across the entire frozen evaluation population.
+2. Higher completion rate.
+3. Higher minimum bucket-mean `drawing_score` across populated length buckets.
+4. Earlier recorded global step.
+5. Lexicographic candidate ID.
+
+Empty buckets are excluded from the minimum. Each complete drawing receives
+`geometry_f1_2px × (1 − out_of_canvas_fraction)`; incomplete drawings receive zero.
+The versioned clipping penalty measures continuous drawn-segment length outside
+the target-normalized 256×256 canvas before rasterization, excluding pen-up jumps.
+Incorrect extra strokes affect quality without automatically making a drawing
+syntactically incomplete.
+
+Float criteria use a finite, nonnegative `--tolerance` (default `1e-6`). At each
+criterion, sort descending and form a group containing the best remaining value
+and all values within tolerance of that anchor. Refine each group using the next
+criterion before continuing to the next anchor. Global step and candidate ID use
+exact comparisons. For example, scores `0.90`, `0.84`, `0.78` with tolerance `0.10`
+group the first two; the third remains separate even though it is close to `0.84`.
+This avoids non-transitive pairwise approximate comparisons and produces the same
+full ranking and tie-resolution trace regardless of candidate input order.
+
+Selection checks each report against the supplied frozen `valid` manifest, matching
+dictionary, inference settings, completeness/scoring versions, target identities,
+saved token evidence, aggregates, image artifacts and actual checkpoint hashes.
+It also requires the independently frozen shared `comparison_manifest.json` beside
+the evaluation manifest, or an explicit `--comparison-manifest PATH` for standalone
+benchmarks. Its seed, dataset hash and target identities must match validation.
+Every candidate must contain exactly its ordered comparison samples and image-index
+IDs; clearing or substituting a candidate's own image lists cannot make it eligible.
+The shared comparison population must be nonempty: `--num-plots 0` runs remain
+diagnostics and cannot select a checkpoint.
+Candidates require IDs and recorded nonnegative integer global steps. Non-quality
+and test reports are always ineligible, as are partial evaluation reports. Duplicate
+candidate IDs invalidate every conflicting report. Rejections are recorded; when no
+candidate is eligible, selection writes a report with no winner and exits nonzero
+without falling back to loss.
+
+Once candidate benchmarks and a shared validation manifest have been produced:
+
+```bash
+.venv/bin/python -B evals/select_checkpoint.py select \
+  --evaluation-manifest runs/free-running-selection/validation/evaluation_manifest.json \
+  --reports-dir runs/free-running-selection/validation \
+  --codebook-path data/processed/sketch_token/codebook.npy \
+  --output runs/free-running-selection/selection.json \
+  --materialize
+```
+
+`selection.json` records the rule, tolerance, frozen identities, full ranking,
+tie-resolution trace, rejected reports, artifact hashes and winner.
+The shared comparison manifest path, file hash and canonical identity are recorded
+too, and held-out verification checks them before generation. Older selection
+artifacts without this reference must be regenerated with `select`; existing
+candidate reports can be reused with their original shared comparison manifest.
+
+`--materialize` atomically publishes a verified byte-for-byte copy as `selected/model.pt` or
+`selected/model.safetensors`, preserving its actual checkpoint format. Existing
+selection outputs or materialization directories are refused.
+
+The CPU selection tests use temporary synthetic report fixtures with known rankings.
+These scores exercise selection mechanics and are never model-quality evidence.
+Checkpoints marked as fixtures remain non-quality and cannot pass production
+selection; the CLI has no fixture bypass. The maintainer performs real-checkpoint
+generation, image review and model acceptance. If the rule changes after review,
+version it and rerun selection consistently across candidates.
+
+# Retained candidates and sequential validation
+
+`trainer.checkpointing.retain_candidates` defaults to `false` and is enabled by
+`anime_tok_dict_long`. Every validation boundary retains an immutable model-only
+checkpoint at `candidates/<stage>/epoch-XXXX-step-XXXXXX.pt`, with configuration,
+training origin, epoch, global step and stage maximum length. Optimizer and scheduler
+states are excluded. After successful atomic saving, `candidates/manifest.jsonl`
+registers its identity, path, stage, epoch, global step, stage maximum length, SHA256
+and validation loss. Collisions are refused; candidates are never overwritten or
+deleted. Resume reports unregistered checkpoints and temporary files left by an
+interrupted save. `last.pt`, stage-local loss-monitored `best.pt`, and final-stage
+early stopping keep their existing behavior.
+
+Evaluate retained checkpoints using one shared complete validation population:
+
+```bash
+.venv/bin/python -B evals/select_checkpoint.py evaluate \
+  --candidate-manifest weights/finetuned/sketchformer-tok-dict-anime-4096/candidates/manifest.jsonl \
+  --experiment anime_tok_dict_long \
+  --data-root data/processed/sketchformer-ready-data/tok-dict-4096 \
+  --codebook-path data/processed/sketch_token/codebook.npy \
+  --device cuda --precision 16-mixed \
+  --max-generation-length 4096 --seed 42 --num-plots 50 \
+  --output-dir runs/free-running-selection/validation
+```
+
+For older checkpoints, replace `--candidate-manifest` with
+`--checkpoints <a.pt> <b.pt> --training-origin real_training`. These candidate
+sources are mutually exclusive. IDs come from checkpoint metadata or the filename
+and hash. Global steps must come from checkpoint metadata or a candidate-manifest
+entry; timestamps and default zero are never used. Relative paths in a supplied
+manifest resolve against its directory. Supplied hashes, IDs and steps must agree
+with embedded metadata. An origin override only fills missing origin: known
+fixture, smoke, sanity, random-init and partial-load reasons remain non-quality.
+
+Before inference, the wrapper freezes `evaluation_manifest.json`, the smaller
+`comparison_manifest.json`, `inference_config.json`, and verified `candidates.json`.
+By default the evaluation population is the entire `valid` split. `--eval-samples N`
+freezes and evaluates a deterministic subset using seed 42 unless overridden.
+Every stage uses the same inference architecture and generation limit, with strict
+loading, greedy free-running decoding, and saved target, predicted and validation
+tokens. Candidate evaluation is sequential.
+
+Each candidate has a directory containing reserved attempt identities, process
+logs, reports, numbered comparison images, and an `images_index.json` linked from
+its report. Non-quality attempt names start with `not-quality-`. Complete artifacts
+are skipped only after verifying their checkpoint hash, frozen settings, population,
+token evidence, aggregates, labels, comparison order and images. Interrupted or
+invalid attempts remain in place and retries use a new attempt name. Changed
+settings or candidate identities require a fresh output directory. Each invocation
+writes `evaluation_attempt_XXXX.json` with complete, skipped and failed outcomes;
+any requested candidate failure produces a nonzero exit after the others finish.
+
+CPU orchestration tests use tiny checkpoints with fixture metadata. Those reports
+remain non-quality and their scores are not model-quality evidence. Real generation,
+candidate image inspection, ranking review and model acceptance belong to the
+maintainer. Generated weights, data and reports stay out of commits.
+
+# Held-out evaluation of the selected checkpoint
+
+Evaluate the saved winner on the complete `test` split after validation selection:
+
+```bash
+.venv/bin/python -B evals/select_checkpoint.py test \
+  --selection runs/free-running-selection/selection.json \
+  --data-root data/processed/sketchformer-ready-data/tok-dict-4096 \
+  --codebook-path data/processed/sketch_token/codebook.npy \
+  --device cuda \
+  --output-dir runs/free-running-selection/test
+```
+
+Before generation, the command checks supported selection/completeness/scoring
+versions, the validation manifest, every ranked report and artifact hash, checkpoint
+hashes, candidate eligibility, and the saved ranking and tie-resolution trace.
+It uses `selected_checkpoint` from `selection.json` when materialized, otherwise
+the winner's recorded checkpoint path. An optional `--checkpoint` must have exactly
+the winner's hash; it cannot bypass verification of the original or materialized
+checkpoint. The dictionary must match selection.
+
+Test inference replays the frozen architecture, token processing, greedy/cache
+settings, precision and generation limit. Device is informational, but its effective
+precision must still match. Optional `--config`, `--precision` and
+`--max-generation-length` overrides must reproduce the frozen inference specification.
+The seed comes from validation. `--num-plots` defaults to 50. There is no test subset
+or partial-batch option: every sample in the requested test split is evaluated.
+
+A separate `evaluation_manifest.json` freezes test targets and split-file hashes.
+The test dataset hash may differ from validation; test sample IDs must be disjoint
+from all IDs used for selection. Overlap or inference mismatches fail before
+generation. Only the saved winner is evaluated, with strict loading and saved token
+evidence. Reports must validate against the entire test population.
+
+The test output records the `selection.json` SHA256 in `selection_reference.json`,
+the report's `held_out` metadata, and `held_out_evaluation_attempt_XXXX.json`.
+Reports have `evaluation_role: held_out`, `selection_eligible: false`, and
+`selection_score: null`; drawing metrics remain held-out diagnostics. Test reports
+cannot enter checkpoint selection and never change `selection.json`. Complete
+matching attempts can be skipped; interrupted or changed artifacts are preserved
+and retried under fresh attempt names. Changed selection references require a fresh
+output directory.
+
+CPU tests exercise this workflow with temporary synthetic report evidence and
+non-quality tiny-model generation. They establish mechanics and test isolation,
+not model quality. Real-checkpoint generation, image review and acceptance remain
+the maintainer's responsibility.

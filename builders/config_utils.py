@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from copy import deepcopy
+import json
 from pathlib import Path
 from typing import Any
 
@@ -11,10 +12,10 @@ import yaml
 
 
 def load_yaml(path: str | Path) -> dict[str, Any]:
-    """Load a YAML file as a dictionary."""
+    """Load YAML or a frozen JSON configuration, preserving JSON numeric types."""
 
     with Path(path).open("r", encoding="utf-8") as handle:
-        data = yaml.safe_load(handle)
+        data = json.load(handle) if Path(path).suffix == ".json" else yaml.safe_load(handle)
     if not isinstance(data, dict):
         raise ValueError(f"Expected YAML mapping in {path}")
     return data

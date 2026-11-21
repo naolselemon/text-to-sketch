@@ -25,13 +25,13 @@ fixtures are created inside each test.
 Run all tests:
 
 ```bash
-python -B -m unittest discover -s tests
+.venv/bin/python -B -m unittest discover -s tests -v
 ```
 
 Run the deterministic periodic long-sequence eval:
 
 ```bash
-python -B evals/long_sequence_eval.py
+.venv/bin/python -B evals/long_sequence_eval.py
 ```
 
 Run the serial/parallel preprocessing equivalence eval:
@@ -41,3 +41,20 @@ python -B evals/parallel_preprocessing_eval.py
 ```
 
 The `-B` flag avoids writing `__pycache__` files into the repository.
+
+Free-running checkpoint selection tests cover drawing completeness and clipping,
+frozen evaluation populations, report evidence, deterministic ranking, candidate
+retention, sequential evaluation, materialization and held-out isolation. The
+suite includes the existing benchmark and failure-analysis tests.
+
+The CLI hand-off regressions exercise actual tiny CPU fixture generation through
+`evaluate` and prove those non-quality reports cannot select or materialize a
+model. Temporary synthetic report fixtures exercise successful selection and
+materialization with known rankings. The held-out CLI entry point uses synthetic
+candidate reports, then verifies the materialized winner, complete disjoint test
+population, selection hash and rejection of test-based
+reselection. There is no fixture bypass in the production CLI. All of these
+results establish mechanics, never model quality.
+
+See the [maintainer hand-off](../evals/free_running_handoff.md) for real-checkpoint
+commands and the remaining generation, image-review and acceptance work.

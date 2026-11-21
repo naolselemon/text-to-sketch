@@ -10,6 +10,7 @@ import torch
 from scipy.ndimage import distance_transform_edt
 
 from utils.tokenizer import decode_tokens
+from metrics.sketchformer.drawing import score_drawing, target_canvas_transform, token_layout
 
 LENGTH_BUCKETS = (
     (1, 512),
@@ -48,6 +49,8 @@ def free_running_reconstruction_records(
     codebook: np.ndarray,
     *,
     eos_token_id: int,
+    generation_limit: int | None = None,
+    layout: dict | None = None,
 ) -> list[dict[str, float | int | str]]:
     """Return per-sketch metrics so variable batch sizes cannot bias totals."""
 
@@ -77,7 +80,11 @@ def free_running_reconstruction_records(
 
         target_stroke = decode_tokens(target, codebook)
         prediction_stroke = decode_tokens(prediction, codebook)
-        f1 = _stroke_f1(target_stroke, prediction_stroke, tolerance_px=2.0)
+        drawing = score_drawing(
+            generated[row].numpy(), target, codebook,
+            generation_limit=generation_limit or generated.shape[1],
+            layout=layout or {**token_layout(codebook), "eos_token_id": eos_token_id},
+        )
         records.append(
             {
                 "target_length": target_length,
@@ -86,7 +93,7 @@ def free_running_reconstruction_records(
                 "exact_match": exact_match,
                 "eos_rate": eos_rate,
                 "max_length_hit": max_length_hit,
-                "geometry_f1_2px": f1,
+                **drawing,
             }
         )
     return records
@@ -139,11 +146,7 @@ def _stroke_f1(target: np.ndarray, prediction: np.ndarray, *, tolerance_px: floa
     if not target_lines or not prediction_lines:
         return float(not target_lines and not prediction_lines)
 
-    target_points = np.concatenate(target_lines, axis=0)
-    minimum = target_points.min(axis=0)
-    maximum = target_points.max(axis=0)
-    scale = 220.0 / max(float(np.max(maximum - minimum)), 1e-6)
-    offset = np.asarray([18.0, 18.0], dtype=np.float32) - minimum * scale
+    scale, offset = target_canvas_transform(target_lines)
     target_canvas = _rasterize_lines(target_lines, scale, offset)
     prediction_canvas = _rasterize_lines(prediction_lines, scale, offset)
     if not target_canvas.any() or not prediction_canvas.any():

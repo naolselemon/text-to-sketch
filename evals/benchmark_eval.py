@@ -48,6 +48,12 @@ from dataloaders import StrokeSequenceDataModule
 from metrics.sketchformer.free_running import (
     free_running_reconstruction_records,
 )
+from metrics.sketchformer.drawing import validation_tokens, validate_drawing
+from evals.selection_common import (
+    build_evaluation_manifest, dictionary_identity, dictionary_layout,
+    freeze_manifest, inference_settings, json_sha256, restrict_loader,
+)
+from evals.report_evidence import checkpoint_metadata, classify_report
 from metrics.sketchformer.reconstruction import (
     collect_generated_reconstruction_examples,
 )
@@ -261,6 +267,9 @@ def _fr_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
         "eos_rate",
         "max_length_hit",
         "geometry_f1_2px",
+        "drawing_score",
+        "complete",
+        "out_of_canvas_fraction",
     ):
         result["fr_" + name] = float(np.mean([r[name] for r in records]))
     result["fr_token_accuracy_mean"] = result["fr_token_accuracy"]
@@ -309,6 +318,11 @@ def run_free_running(
                 batch,
                 codebook,
                 eos_token_id=eos_token_id,
+                generation_limit=max_generation_length or int(batch["lengths"].max()),
+                layout={"codebook_size": len(codebook), "motion_token_offset": 1,
+                        "vocab_size": len(codebook) + 4, "eos_token_id": eos_token_id,
+                        "sos_token_id": sos_token_id, "pad_token_id": pad_token_id,
+                        "sep_token_id": sep_token_id},
             )
             targets = batch["targets"].detach().cpu()
             predictions = generation.tokens.detach().cpu()
@@ -334,6 +348,10 @@ def run_free_running(
                 if save_predictions:
                     record["target_tokens"] = target.tolist()
                     record["predicted_tokens"] = pred.tolist()
+                    record["validation_tokens"] = validation_tokens(
+                        predictions[row].numpy(), eos_token_id=eos_token_id,
+                        pad_token_id=pad_token_id,
+                    ).tolist()
                 all_records.append(record)
             if num_plots:
                 for example in collect_generated_reconstruction_examples(
@@ -469,6 +487,14 @@ def parse_args() -> argparse.Namespace:
         help="Experiment name (defaults to anime_tok_dict_finetune for full 2048 sequence length).",
     )
     parser.add_argument("--checkpoint", default=None)
+    parser.add_argument("--evaluation-manifest", type=Path)
+    parser.add_argument("--eval-samples", type=int)
+    parser.add_argument("--candidate-id")
+    parser.add_argument("--candidate-registry", type=Path)
+    parser.add_argument("--global-step", type=int)
+    parser.add_argument("--smoke-test", action="store_true")
+    parser.add_argument("--training-origin", choices=['real_training'])
+    parser.add_argument("--image-captions", action="store_true")
     parser.add_argument("--split", choices=["valid", "test"], default="valid")
     parser.add_argument("--data-root", default=None)
     parser.add_argument(
@@ -550,6 +576,7 @@ def _prepare_loader(config: dict[str, Any], split: str, seed: int):
     dataset.transform = BenchmarkTokenTransform(
         dataset.transform,
         int(config["data"]["format"]["token_dictionary"]["pad_token_id"]),
+        _load_codebook(config), dictionary_layout(config),
     )
     for index in range(len(dataset)):
         try:
@@ -567,16 +594,26 @@ def _prepare_loader(config: dict[str, Any], split: str, seed: int):
 
 
 class BenchmarkTokenTransform:
-    """Remove storage padding before the existing non-truncating token transform."""
+    """Validate stored targets without repairing SOS/EOS or internal padding."""
 
-    def __init__(self, transform, pad_token_id):
+    def __init__(self, transform, pad_token_id, codebook, layout):
         self.transform = transform
         self.pad_token_id = pad_token_id
+        self.codebook = codebook
+        self.layout = layout
 
     def __call__(self, sample):
         sample = dict(sample)
         tokens = np.asarray(sample["tokens"])
-        sample["tokens"] = tokens[tokens != self.pad_token_id]
+        tokens = validation_tokens(tokens, eos_token_id=self.layout['eos_token_id'], pad_token_id=self.pad_token_id)
+        if len(tokens) > self.transform.max_length:
+            raise ValueError(f'Sequence length {len(tokens)} exceeds max_length={self.transform.max_length}')
+        checked = validate_drawing(tokens, self.codebook, generation_limit=self.transform.max_length, layout=self.layout)
+        # Targets with one point remain valid token targets for legacy diagnostics.
+        reasons = [r for r in checked['failure_reasons'] if r != 'empty_output']
+        if reasons:
+            raise ValueError('Invalid benchmark target: ' + ', '.join(reasons))
+        sample["tokens"] = tokens
         return self.transform(sample)
 
 
@@ -648,6 +685,23 @@ def main() -> int:
             f"Run artifacts already exist for {run_name}; choose a new --run-name to preserve the baseline"
         )
     loader = _prepare_loader(config, args.split, seed)
+    if args.max_generation_length is None:
+        args.max_generation_length = capacity
+    codebook_path_for_manifest = config['data']['format']['token_dictionary']
+    directory = codebook_path_for_manifest.get('codebook_dir')
+    dictionary_path = PROJECT_ROOT / (str(Path(directory) / 'codebook.npy') if directory else codebook_path_for_manifest['codebook_path'])
+    settings = inference_settings(config, precision.effective, args.max_generation_length)
+    proposed = build_evaluation_manifest(loader.dataset, args.split,
+        dictionary_identity(dictionary_path, dictionary_layout(config)), settings, seed, args.eval_samples)
+    manifest_path = args.evaluation_manifest or output_dir / f'{run_name}_evaluation_manifest.json'
+    # Reusing a subset must reconstruct precisely the frozen IDs, independent of eval-samples.
+    if manifest_path.exists() and args.eval_samples is None:
+        from evals.selection_common import read_json
+        frozen = read_json(manifest_path)
+        population = records_by_id(proposed['samples'])
+        proposed['samples'] = [population[r['sample_id']] for r in frozen['samples']]
+    manifest = freeze_manifest(manifest_path, proposed)
+    loader = restrict_loader(loader, manifest)
     raw_model = build_model(config["model"])
     checkpoint_load = None
     if args.checkpoint:
@@ -657,6 +711,17 @@ def main() -> int:
             strict=not args.allow_partial_checkpoint,
         )
         print(f"[benchmark] loaded checkpoint: {args.checkpoint}")
+    metadata = checkpoint_metadata(PROJECT_ROOT / args.checkpoint) if args.checkpoint else {}
+    embedded_step = metadata.get('global_step', metadata.get('step'))
+    if args.global_step is not None and embedded_step is not None and args.global_step != embedded_step:
+        raise ValueError('global-step conflicts with checkpoint metadata')
+    if args.global_step is None:
+        args.global_step = embedded_step
+    if args.candidate_id is None and args.checkpoint:
+        args.candidate_id = metadata.get('candidate_id') or f'{Path(args.checkpoint).stem}-{_file_sha256(PROJECT_ROOT / args.checkpoint)[:12]}'
+    classification = classify_report(metadata, random_init=not bool(args.checkpoint),
+        smoke_test=args.smoke_test, experiment=config.get('experiment', {}).get('name', args.experiment),
+        partial_load=args.allow_partial_checkpoint, training_origin_override=args.training_origin)
     model = maybe_compile_model(raw_model.to(device), config["model"])
     loss_fn = build_loss(config["optimizer"]).to(device)
     codebook = None
@@ -683,9 +748,13 @@ def main() -> int:
             "device": str(device),
             "checkpoint_load": checkpoint_load,
             "random_initialization": not bool(args.checkpoint),
+            "batch_size": config['data']['batching']['eval_batch_size'],
+            "smoke_test": args.smoke_test,
+            "training_origin_override": args.training_origin,
+            "partial_loading_override": args.allow_partial_checkpoint,
         }
     )
-    files = sorted(loader.dataset.files)
+    files = sorted(loader.dataset.dataset.files)
     provenance["dataset_files"] = {p.name: _file_sha256(p) for p in files}
     provenance["dataset_sha256"] = hashlib.sha256(
         json.dumps(provenance["dataset_files"], sort_keys=True).encode(),
@@ -693,16 +762,27 @@ def main() -> int:
     comparison_ids = None
     selection_seed = seed
     if args.comparison_manifest:
-        manifest = json.loads(Path(args.comparison_manifest).read_text())
-        if manifest.get("dataset_sha256") != provenance["dataset_sha256"]:
+        comparison_manifest = json.loads(Path(args.comparison_manifest).read_text())
+        if comparison_manifest.get("dataset_sha256") != provenance["dataset_sha256"]:
             raise ValueError(
                 "Comparison manifest belongs to a different dataset snapshot"
             )
-        if manifest.get("length_definition") != LENGTH_DEFINITION:
+        if comparison_manifest.get("length_definition") != LENGTH_DEFINITION:
             raise ValueError("Comparison manifest uses a different length definition")
-        comparison_ids = [row["sample_id"] for row in manifest["samples"]]
-        selection_seed = int(manifest["seed"])
-    report = {"schema_version": 2, "provenance": provenance}
+        comparison_ids = [row["sample_id"] for row in comparison_manifest["samples"]]
+        selection_seed = int(comparison_manifest["seed"])
+    report = {"schema_version": 2, "provenance": provenance, **classification,
+        "evaluation": {"manifest_path": str(manifest_path.resolve()),
+                       "manifest_sha256": json_sha256(manifest),
+                       "dictionary": manifest['dictionary'],
+                       "inference_settings": settings,
+                       "inference_fingerprint": manifest['inference_fingerprint']},
+        "candidate": {"candidate_id": args.candidate_id, "global_step": args.global_step,
+                      "path": str((PROJECT_ROOT / args.checkpoint).resolve()) if args.checkpoint else None,
+                      "sha256": provenance.get('checkpoint_sha256')},
+    }
+    if args.candidate_registry:
+        report['candidate']['manifest_path'] = str(args.candidate_registry.resolve())
     output_dir.mkdir(parents=True, exist_ok=True)
     tf_records = []
     if device.type == "cuda":
@@ -774,6 +854,10 @@ def main() -> int:
             comparison_ids=comparison_ids,
         )
         per_sample = fr_results.pop("per_sample_records")
+        for record in per_sample:
+            record.update(candidate_id=report['candidate']['candidate_id'],
+                          global_step=report['candidate']['global_step'],
+                          checkpoint_sha256=report['candidate']['sha256'])
         if (
             tf_records
             and records_by_id(tf_records).keys() != records_by_id(per_sample).keys()
@@ -783,6 +867,7 @@ def main() -> int:
         _write_jsonl(per_sample_path, per_sample)
         fr_results["per_sample_path"] = per_sample_path.name
         selection = fr_results.pop("comparison_samples")
+        report['evaluation']['comparison_samples'] = selection
         selection_path = output_dir / f"{run_name}_comparison_manifest.json"
         selection_path.write_text(
             json.dumps(
@@ -805,7 +890,23 @@ def main() -> int:
     if examples:
         from metrics.sketchformer.visualisation import save_reconstruction_examples
 
-        save_reconstruction_examples(examples, output_dir / f"{run_name}_plots")
+        captions = None
+        if args.image_captions:
+            captions = {'checkpoint': (provenance.get('checkpoint_sha256') or 'random')[:12],
+                        'kind': classification['report_kind'], 'reasons': classification['not_quality_reasons'],
+                        'seed': seed, 'generation_limit': args.max_generation_length, 'decoding': 'greedy', 'cache': True}
+        image_paths = save_reconstruction_examples(examples, output_dir / f"{run_name}_plots", caption_metadata=captions)
+    else:
+        image_paths = []
+    if 'free_running' in report:
+        index_path = output_dir / f'{run_name}_plots' / 'images_index.json'
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        index_path.write_text(json.dumps({'schema_version': 1, 'images': [
+            {'path': str(path.relative_to(output_dir)), 'sample_id': row['sample_id'],
+             'checkpoint_sha256': report['candidate']['sha256'], 'settings': settings}
+            for path, row in zip(image_paths, report['evaluation']['comparison_samples'])
+        ]}, indent=2))
+        report['free_running']['images_index_path'] = str(index_path.relative_to(output_dir))
     report_path.write_text(
         json.dumps(report, indent=2, allow_nan=False), encoding="utf-8"
     )
